@@ -12,7 +12,6 @@ pub struct ParsedProgram {
     source: String,
     file: ast::SourceFile,
     line_index: LineIndex,
-    limits: Limits,
 }
 
 impl ParsedProgram {
@@ -24,9 +23,6 @@ impl ParsedProgram {
     }
     pub(crate) fn file(&self) -> &ast::SourceFile {
         &self.file
-    }
-    pub(crate) fn limits(&self) -> Limits {
-        self.limits
     }
 }
 
@@ -49,7 +45,6 @@ pub(crate) fn parse(bytes: &[u8], limits: Limits) -> Result<ParsedProgram, Diagn
         line_index: LineIndex::new(&source),
         source,
         file,
-        limits,
     })
 }
 
