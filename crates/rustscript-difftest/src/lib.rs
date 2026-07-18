@@ -190,26 +190,56 @@ pub fn run_case(
     }
     let generated = rustscript_core::generate_checked_program(&decisions);
     let source = rustscript_core::format(&generated);
-    let checked = rustscript_core::check_source(&source, rustscript_core::Limits::default())
+    compare_source(seed, case_index, &source, oracle, true)
+}
+
+/// Replay an arbitrary source file through the same comparison pipeline.
+pub fn replay_source(source: &str, oracle: &RustcOracle) -> Result<CaseSuccess, Box<DiffFailure>> {
+    compare_source(0, 0, source, oracle, false)
+}
+
+fn compare_source(
+    seed: u64,
+    case_index: usize,
+    source: &str,
+    oracle: &RustcOracle,
+    require_canonical_input: bool,
+) -> Result<CaseSuccess, Box<DiffFailure>> {
+    let checked = rustscript_core::check_source(source, rustscript_core::Limits::default())
         .map_err(|error| {
             failure(
                 DiffFailureKind::PrettyPrintRoundTrip,
                 seed,
                 case_index,
-                &source,
-                &source,
+                source,
+                source,
                 format!("canonical source failed checking: {error}"),
                 Vec::new(),
                 None,
             )
         })?;
     let canonical = rustscript_core::format(&checked);
-    if canonical != source {
+    let reparsed = rustscript_core::check_source(&canonical, rustscript_core::Limits::default())
+        .map_err(|error| {
+            failure(
+                DiffFailureKind::PrettyPrintRoundTrip,
+                seed,
+                case_index,
+                source,
+                &canonical,
+                format!("formatted source failed checking: {error}"),
+                Vec::new(),
+                None,
+            )
+        })?;
+    if rustscript_core::format(&reparsed) != canonical
+        || (require_canonical_input && canonical != source)
+    {
         return Err(failure(
             DiffFailureKind::PrettyPrintRoundTrip,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             "canonical emitter was not idempotent".into(),
             Vec::new(),
@@ -222,7 +252,7 @@ pub fn run_case(
             DiffFailureKind::PrettyPrintRoundTrip,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             format!("generated program trapped: {error}"),
             Vec::new(),
@@ -234,7 +264,7 @@ pub fn run_case(
             DiffFailureKind::NondeterministicInterpreter,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             format!("second interpreter run failed: {error}"),
             first.output.clone(),
@@ -246,7 +276,7 @@ pub fn run_case(
             DiffFailureKind::NondeterministicInterpreter,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             "repeated interpreter runs differed".into(),
             first.output,
@@ -258,7 +288,7 @@ pub fn run_case(
             DiffFailureKind::NativeFailure,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             format!("oracle failed: {error}"),
             first.output.clone(),
@@ -270,7 +300,7 @@ pub fn run_case(
             DiffFailureKind::RustcRejectedAcceptedProgram,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             "rustc rejected an accepted program".into(),
             first.output,
@@ -282,7 +312,7 @@ pub fn run_case(
             DiffFailureKind::NativeFailure,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             "native result was missing".into(),
             first.output,
@@ -294,7 +324,7 @@ pub fn run_case(
             DiffFailureKind::NativeTimeout,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             "native program timed out".into(),
             first.output,
@@ -306,7 +336,7 @@ pub fn run_case(
             DiffFailureKind::NativeFailure,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             "native program failed".into(),
             first.output,
@@ -318,7 +348,7 @@ pub fn run_case(
             DiffFailureKind::UnexpectedNativeStderr,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             "native program wrote stderr".into(),
             first.output,
@@ -330,7 +360,7 @@ pub fn run_case(
             DiffFailureKind::StdoutMismatch,
             seed,
             case_index,
-            &source,
+            source,
             &canonical,
             "native and interpreter stdout differed".into(),
             first.output,
@@ -340,7 +370,7 @@ pub fn run_case(
     Ok(CaseSuccess {
         seed,
         case_index,
-        source,
+        source: source.into(),
         stdout: first.output,
         steps: first.steps,
     })
@@ -370,6 +400,107 @@ fn failure(
         interpreter_stdout,
         oracle,
     })
+}
+
+/// Persist a complete, non-overwriting differential failure artifact.
+pub fn write_failure_artifact(failure: &DiffFailure, root: &Path) -> io::Result<PathBuf> {
+    let directory = unique_artifact_directory(root, failure.seed, failure.case_index)?;
+    write_file(&directory, "failure.rs", failure.source.as_bytes())?;
+    write_file(&directory, "canonical.rs", failure.canonical.as_bytes())?;
+    // The initial reducer candidate is canonical and remains reproducible. Later
+    // reductions replace this file only after preserving the failure category.
+    write_file(&directory, "minimized.rs", failure.canonical.as_bytes())?;
+    let ast = rustscript_core::check_source(&failure.canonical, rustscript_core::Limits::default())
+        .map(|program| rustscript_core::debug_ir(&program))
+        .unwrap_or_else(|error| format!("checked IR unavailable: {error}"));
+    write_file(&directory, "ast.txt", ast.as_bytes())?;
+    write_file(
+        &directory,
+        "interpreter.stdout",
+        &failure.interpreter_stdout,
+    )?;
+
+    let mut metadata = format!(
+        "seed={}\ncase={}\ncategory={:?}\nreason={}\nhost_os={}\nhost_arch={}\nreproduce=cargo run -p rustscript-difftest -- --seed {} --case {}\n",
+        failure.seed,
+        failure.case_index,
+        failure.kind,
+        failure.reason,
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        failure.seed,
+        failure.case_index,
+    );
+    if let Some(oracle) = &failure.oracle {
+        metadata.push_str("rustc_version=\n");
+        metadata.push_str(&oracle.rustc_version);
+        metadata.push_str("rustc_argv=");
+        metadata.push_str(&oracle.rustc_argv.join(" "));
+        metadata.push('\n');
+        write_file(&directory, "compiler.stdout", &oracle.compiler.stdout)?;
+        write_file(&directory, "compiler.stderr", &oracle.compiler.stderr)?;
+        if let Some(native) = &oracle.native {
+            write_file(&directory, "native.stdout", &native.stdout)?;
+            write_file(&directory, "native.stderr", &native.stderr)?;
+        } else {
+            write_file(&directory, "native.stdout", &[])?;
+            write_file(&directory, "native.stderr", &[])?;
+        }
+    } else {
+        for name in [
+            "compiler.stdout",
+            "compiler.stderr",
+            "native.stdout",
+            "native.stderr",
+        ] {
+            write_file(&directory, name, &[])?;
+        }
+    }
+    write_file(&directory, "metadata.txt", metadata.as_bytes())?;
+    Ok(directory)
+}
+
+/// Persist a successful case when the runner's `--keep-all` option is active.
+pub fn write_success_artifact(success: &CaseSuccess, root: &Path) -> io::Result<PathBuf> {
+    let directory = unique_artifact_directory(root, success.seed, success.case_index)?;
+    write_file(&directory, "canonical.rs", success.source.as_bytes())?;
+    write_file(&directory, "interpreter.stdout", &success.stdout)?;
+    write_file(
+        &directory,
+        "metadata.txt",
+        format!(
+            "seed={}\ncase={}\nsteps={}\n",
+            success.seed, success.case_index, success.steps
+        )
+        .as_bytes(),
+    )?;
+    Ok(directory)
+}
+
+fn unique_artifact_directory(root: &Path, seed: u64, case_index: usize) -> io::Result<PathBuf> {
+    std::fs::create_dir_all(root)?;
+    let stem = format!("seed-{seed}-case-{case_index}");
+    let mut suffix = 0_u64;
+    loop {
+        let name = if suffix == 0 {
+            stem.clone()
+        } else {
+            format!("{stem}-{suffix}")
+        };
+        let path = root.join(name);
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        suffix = suffix
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("artifact suffix space exhausted"))?;
+    }
+}
+
+fn write_file(directory: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    std::fs::write(directory.join(name), bytes)
 }
 
 fn compile_arguments(source: &Path, executable: &Path) -> Vec<OsString> {
@@ -539,6 +670,38 @@ mod tests {
                     failure.kind, failure.reason
                 );
             }
+        }
+    }
+
+    #[test]
+    fn failure_artifacts_are_complete_and_non_overwriting() {
+        let root = tempfile::tempdir().unwrap();
+        let failure = DiffFailure {
+            kind: DiffFailureKind::StdoutMismatch,
+            seed: 7,
+            case_index: 3,
+            source: "fn main() {}".into(),
+            canonical: "fn main() {}\n".into(),
+            reason: "test mismatch".into(),
+            interpreter_stdout: b"interpreter".to_vec(),
+            oracle: None,
+        };
+        let first = write_failure_artifact(&failure, root.path()).unwrap();
+        let second = write_failure_artifact(&failure, root.path()).unwrap();
+        assert_ne!(first, second);
+        for name in [
+            "failure.rs",
+            "canonical.rs",
+            "minimized.rs",
+            "ast.txt",
+            "metadata.txt",
+            "interpreter.stdout",
+            "native.stdout",
+            "native.stderr",
+            "compiler.stdout",
+            "compiler.stderr",
+        ] {
+            assert!(first.join(name).is_file(), "missing {name}");
         }
     }
 }
