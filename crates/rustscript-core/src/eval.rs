@@ -1,7 +1,8 @@
+use ra_ap_syntax::TextRange;
 use ra_ap_syntax::ast::{ArithOp, BinaryOp, CmpOp, LogicOp, Ordering, UnaryOp};
 
 use crate::checked_ir::{Block, Expression, ExpressionKind, FunctionId, Statement};
-use crate::{CheckedProgram, Diagnostic, Phase, Span, Value};
+use crate::{CheckedProgram, Diagnostic, Phase, Value};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
@@ -15,7 +16,7 @@ impl Default for RuntimeLimits {
     fn default() -> Self {
         Self {
             fuel: 1_000_000,
-            max_call_depth: 256,
+            max_call_depth: 1_024,
             max_output_bytes: 1024 * 1024,
         }
     }
@@ -23,10 +24,13 @@ impl Default for RuntimeLimits {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-pub struct Execution {
-    pub output: Vec<u8>,
+pub struct RunResult {
+    pub stdout: Vec<u8>,
     pub steps: u64,
 }
+
+/// Compatibility alias for the interpreter result.
+pub type Execution = RunResult;
 
 enum Control {
     Value(Value),
@@ -55,7 +59,7 @@ struct Evaluator<'a> {
 pub(crate) fn run(
     program: &CheckedProgram,
     limits: RuntimeLimits,
-) -> Result<Execution, Diagnostic> {
+) -> Result<RunResult, Diagnostic> {
     let mut evaluator = Evaluator {
         program,
         limits,
@@ -67,8 +71,8 @@ pub(crate) fn run(
     if value != Value::Unit {
         return Err(runtime_error("main returned a non-unit value", None));
     }
-    Ok(Execution {
-        output: evaluator.output,
+    Ok(RunResult {
+        stdout: evaluator.output,
         steps: limits.fuel - evaluator.fuel,
     })
 }
@@ -78,7 +82,7 @@ impl Evaluator<'_> {
         &mut self,
         id: FunctionId,
         arguments: Vec<Value>,
-        span: Option<Span>,
+        span: Option<TextRange>,
     ) -> Result<Value, Diagnostic> {
         if self.call_depth >= self.limits.max_call_depth {
             return Err(runtime_error("call depth limit exceeded", span));
@@ -171,6 +175,11 @@ impl Evaluator<'_> {
                 Control::Value(value) => Ok(Control::Return(value)),
                 control => Ok(control),
             },
+            Statement::Print { value, span } => {
+                let value = value_or_control!(self.eval_expression(value, locals)?);
+                self.print(value, *span)?;
+                Ok(Control::Value(Value::Unit))
+            }
             Statement::Break(_) => Ok(Control::Break),
             Statement::Continue(_) => Ok(Control::Continue),
             Statement::Expression(expression) => match self.eval_expression(expression, locals)? {
@@ -241,7 +250,7 @@ impl Evaluator<'_> {
         lhs: &Expression,
         rhs: &Expression,
         locals: &mut [Option<Value>],
-        span: Span,
+        span: TextRange,
     ) -> Result<Control, Diagnostic> {
         let left = value_or_control!(self.eval_expression(lhs, locals)?);
         if matches!(
@@ -286,7 +295,7 @@ impl Evaluator<'_> {
         Ok(Control::Value(value))
     }
 
-    fn unary(&self, op: UnaryOp, operand: Value, span: Span) -> Result<Value, Diagnostic> {
+    fn unary(&self, op: UnaryOp, operand: Value, span: TextRange) -> Result<Value, Diagnostic> {
         match (op, operand) {
             (UnaryOp::Neg, Value::I64(value)) => value
                 .checked_neg()
@@ -302,7 +311,7 @@ impl Evaluator<'_> {
         locals: &mut [Option<Value>],
         id: usize,
         value: Value,
-        span: Span,
+        span: TextRange,
     ) -> Result<(), Diagnostic> {
         let slot = locals
             .get_mut(id)
@@ -311,11 +320,38 @@ impl Evaluator<'_> {
         Ok(())
     }
 
-    fn step(&mut self, span: Span) -> Result<(), Diagnostic> {
+    fn step(&mut self, span: TextRange) -> Result<(), Diagnostic> {
         if self.fuel == 0 {
             return Err(runtime_error("fuel exhausted", Some(span)));
         }
         self.fuel -= 1;
+        Ok(())
+    }
+
+    fn print(&mut self, value: Value, span: TextRange) -> Result<(), Diagnostic> {
+        let mut line = match value {
+            Value::I64(value) => value.to_string().into_bytes(),
+            Value::Bool(value) => {
+                if value {
+                    b"true".to_vec()
+                } else {
+                    b"false".to_vec()
+                }
+            }
+            Value::Unit => {
+                return Err(runtime_error("invalid checked print value", Some(span)));
+            }
+        };
+        line.push(b'\n');
+        let new_len = self
+            .output
+            .len()
+            .checked_add(line.len())
+            .ok_or_else(|| runtime_error("output byte limit exceeded", Some(span)))?;
+        if new_len > self.limits.max_output_bytes {
+            return Err(runtime_error("output byte limit exceeded", Some(span)));
+        }
+        self.output.extend_from_slice(&line);
         Ok(())
     }
 }
@@ -339,20 +375,21 @@ fn arithmetic_message(op: ArithOp, rhs: i64) -> &'static str {
     }
 }
 
-fn statement_span(statement: &Statement) -> Span {
+fn statement_span(statement: &Statement) -> TextRange {
     match statement {
         Statement::Let { initializer, .. } => initializer.span,
         Statement::Assign { span, .. }
         | Statement::While { span, .. }
         | Statement::Return { span, .. }
+        | Statement::Print { span, .. }
         | Statement::Break(span)
         | Statement::Continue(span) => *span,
         Statement::Expression(expression) => expression.span,
     }
 }
 
-fn runtime_error(message: &str, span: Option<Span>) -> Diagnostic {
-    Diagnostic::new(Phase::Runtime, message, span)
+fn runtime_error(message: &str, span: Option<TextRange>) -> Diagnostic {
+    Diagnostic::new(Phase::Runtime, message, span.map(crate::diagnostic::span))
 }
 
 #[cfg(test)]
@@ -368,10 +405,11 @@ mod tests {
 
     #[test]
     fn executes_calls_mutation_loops_and_short_circuiting() {
-        let source = "fn add(x: i64, y: i64) -> i64 { x + y } fn main() { let mut x = add(1_i64, 2_i64); while x < 5_i64 { x = x + 1_i64; } let ok = false && (1_i64 / 0_i64 == 0_i64); }";
+        let source = "fn add(x: i64, y: i64) -> i64 { x + y } fn main() { let mut x = add(1_i64, 2_i64); while x < 5_i64 { x = x + 1_i64; } let ok = false && (1_i64 / 0_i64 == 0_i64); println!(\"{}\", x); println!(\"{}\", ok); }";
         let first = execute(source).unwrap();
         let second = execute(source).unwrap();
         assert_eq!(first, second);
+        assert_eq!(first.stdout, b"5\nfalse\n");
         assert!(first.steps > 0);
     }
 
@@ -388,5 +426,20 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.phase, crate::Phase::Runtime);
+
+        let program = check_source(
+            "fn main() { println!(\"{}\", 123_i64); }",
+            Limits::default(),
+        )
+        .unwrap();
+        let error = run(
+            &program,
+            RuntimeLimits {
+                max_output_bytes: 3,
+                ..RuntimeLimits::default()
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.message, "output byte limit exceeded");
     }
 }

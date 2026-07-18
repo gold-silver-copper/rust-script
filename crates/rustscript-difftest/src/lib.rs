@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -26,6 +27,7 @@ pub struct RustcOracle {
     compile_timeout: Duration,
     run_timeout: Duration,
     stream_cap: usize,
+    version_cache: Arc<OnceLock<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -65,6 +67,7 @@ pub struct DiffFailure {
     pub case_index: usize,
     pub source: String,
     pub canonical: String,
+    pub minimized: String,
     pub reason: String,
     pub interpreter_stdout: Vec<u8>,
     pub oracle: Option<OracleResult>,
@@ -114,6 +117,7 @@ impl RustcOracle {
             compile_timeout: Duration::from_secs(10),
             run_timeout: Duration::from_secs(2),
             stream_cap: DEFAULT_STREAM_CAP,
+            version_cache: Arc::new(OnceLock::new()),
         }
     }
 
@@ -131,8 +135,13 @@ impl RustcOracle {
     }
 
     pub fn version(&self) -> Result<String, OracleError> {
+        if let Some(version) = self.version_cache.get() {
+            return Ok(version.clone());
+        }
         let output = Command::new(&self.rustc).arg("-Vv").output()?;
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        let version = String::from_utf8_lossy(&output.stdout).into_owned();
+        let _ = self.version_cache.set(version.clone());
+        Ok(version)
     }
 
     pub fn run_source(&self, source: &str) -> Result<OracleResult, OracleError> {
@@ -232,7 +241,8 @@ fn compare_source(
                 None,
             )
         })?;
-    if rustscript_core::format(&reparsed) != canonical
+    if !checked.structurally_eq(&reparsed)
+        || rustscript_core::format(&reparsed) != canonical
         || (require_canonical_input && canonical != source)
     {
         return Err(failure(
@@ -259,6 +269,30 @@ fn compare_source(
             None,
         )
     })?;
+    let round_trip = rustscript_core::run(&reparsed, limits).map_err(|error| {
+        failure(
+            DiffFailureKind::PrettyPrintRoundTrip,
+            seed,
+            case_index,
+            source,
+            &canonical,
+            format!("reparsed canonical program trapped: {error}"),
+            first.stdout.clone(),
+            None,
+        )
+    })?;
+    if round_trip != first {
+        return Err(failure(
+            DiffFailureKind::PrettyPrintRoundTrip,
+            seed,
+            case_index,
+            source,
+            &canonical,
+            "canonical round trip changed interpreter behavior".into(),
+            first.stdout,
+            None,
+        ));
+    }
     let second = rustscript_core::run(&checked, limits).map_err(|error| {
         failure(
             DiffFailureKind::NondeterministicInterpreter,
@@ -267,7 +301,7 @@ fn compare_source(
             source,
             &canonical,
             format!("second interpreter run failed: {error}"),
-            first.output.clone(),
+            first.stdout.clone(),
             None,
         )
     })?;
@@ -279,7 +313,7 @@ fn compare_source(
             source,
             &canonical,
             "repeated interpreter runs differed".into(),
-            first.output,
+            first.stdout,
             None,
         ));
     }
@@ -291,7 +325,7 @@ fn compare_source(
             source,
             &canonical,
             format!("oracle failed: {error}"),
-            first.output.clone(),
+            first.stdout.clone(),
             None,
         )
     })?;
@@ -303,7 +337,7 @@ fn compare_source(
             source,
             &canonical,
             "rustc rejected an accepted program".into(),
-            first.output,
+            first.stdout,
             Some(result),
         ));
     }
@@ -315,7 +349,7 @@ fn compare_source(
             source,
             &canonical,
             "native result was missing".into(),
-            first.output,
+            first.stdout,
             Some(result),
         ));
     };
@@ -327,7 +361,7 @@ fn compare_source(
             source,
             &canonical,
             "native program timed out".into(),
-            first.output,
+            first.stdout,
             Some(result),
         ));
     }
@@ -339,7 +373,7 @@ fn compare_source(
             source,
             &canonical,
             "native program failed".into(),
-            first.output,
+            first.stdout,
             Some(result),
         ));
     }
@@ -351,11 +385,11 @@ fn compare_source(
             source,
             &canonical,
             "native program wrote stderr".into(),
-            first.output,
+            first.stdout,
             Some(result),
         ));
     }
-    if native.stdout != first.output {
+    if native.stdout != first.stdout {
         return Err(failure(
             DiffFailureKind::StdoutMismatch,
             seed,
@@ -363,7 +397,7 @@ fn compare_source(
             source,
             &canonical,
             "native and interpreter stdout differed".into(),
-            first.output,
+            first.stdout,
             Some(result),
         ));
     }
@@ -371,7 +405,7 @@ fn compare_source(
         seed,
         case_index,
         source: source.into(),
-        stdout: first.output,
+        stdout: first.stdout,
         steps: first.steps,
     })
 }
@@ -396,10 +430,42 @@ fn failure(
         case_index,
         source: source.into(),
         canonical: canonical.into(),
+        minimized: canonical.into(),
         reason,
         interpreter_stdout,
         oracle,
     })
+}
+
+/// Greedily retain smaller checked-IR candidates that reproduce the same
+/// differential failure category.
+pub fn minimize_failure(failure: &mut DiffFailure, oracle: &RustcOracle) {
+    let mut current = failure.canonical.clone();
+    while let Ok(program) =
+        rustscript_core::check_source(&current, rustscript_core::Limits::default())
+    {
+        let mut candidates: Vec<_> = rustscript_core::reduction_candidates(&program)
+            .into_iter()
+            .map(|candidate| rustscript_core::format(&candidate))
+            .filter(|candidate| candidate.len() < current.len())
+            .collect();
+        candidates.sort_by_key(String::len);
+        candidates.dedup();
+        let mut accepted = None;
+        for candidate in candidates {
+            if let Err(candidate_failure) = replay_source(&candidate, oracle)
+                && candidate_failure.kind == failure.kind
+            {
+                accepted = Some(candidate);
+                break;
+            }
+        }
+        let Some(candidate) = accepted else {
+            break;
+        };
+        current = candidate;
+    }
+    failure.minimized = current;
 }
 
 /// Persist a complete, non-overwriting differential failure artifact.
@@ -407,12 +473,10 @@ pub fn write_failure_artifact(failure: &DiffFailure, root: &Path) -> io::Result<
     let directory = unique_artifact_directory(root, failure.seed, failure.case_index)?;
     write_file(&directory, "failure.rs", failure.source.as_bytes())?;
     write_file(&directory, "canonical.rs", failure.canonical.as_bytes())?;
-    // The initial reducer candidate is canonical and remains reproducible. Later
-    // reductions replace this file only after preserving the failure category.
-    write_file(&directory, "minimized.rs", failure.canonical.as_bytes())?;
-    let ast = rustscript_core::check_source(&failure.canonical, rustscript_core::Limits::default())
-        .map(|program| rustscript_core::debug_ir(&program))
-        .unwrap_or_else(|error| format!("checked IR unavailable: {error}"));
+    write_file(&directory, "minimized.rs", failure.minimized.as_bytes())?;
+    let ast = rustscript_core::parse(&failure.canonical, rustscript_core::Limits::default())
+        .map(|program| rustscript_core::debug_syntax(&program))
+        .unwrap_or_else(|error| format!("syntax tree unavailable: {error}"));
     write_file(&directory, "ast.txt", ast.as_bytes())?;
     write_file(
         &directory,
@@ -421,13 +485,16 @@ pub fn write_failure_artifact(failure: &DiffFailure, root: &Path) -> io::Result<
     )?;
 
     let mut metadata = format!(
-        "seed={}\ncase={}\ncategory={:?}\nreason={}\nhost_os={}\nhost_arch={}\nreproduce=cargo run -p rustscript-difftest -- --seed {} --case {}\n",
+        "seed={}\ncase={}\ncategory={:?}\nreason={}\nhost_os={}\nhost_arch={}\ngenerator_helpers=0..=4\ngenerator_parameters=0..=3\ngenerator_expression_depth=5\ngenerator_loop_bound=8\ninterpreter_fuel={}\ninterpreter_call_depth={}\ninterpreter_output_bytes={}\nreproduce=cargo run -p rustscript-difftest -- --seed {} --case {}\nreplay=cargo run -p rustscript-difftest -- --replay failure.rs\n",
         failure.seed,
         failure.case_index,
         failure.kind,
         failure.reason,
         std::env::consts::OS,
         std::env::consts::ARCH,
+        rustscript_core::RuntimeLimits::default().fuel,
+        rustscript_core::RuntimeLimits::default().max_call_depth,
+        rustscript_core::RuntimeLimits::default().max_output_bytes,
         failure.seed,
         failure.case_index,
     );
@@ -682,6 +749,7 @@ mod tests {
             case_index: 3,
             source: "fn main() {}".into(),
             canonical: "fn main() {}\n".into(),
+            minimized: "fn main() {}\n".into(),
             reason: "test mismatch".into(),
             interpreter_stdout: b"interpreter".to_vec(),
             oracle: None,

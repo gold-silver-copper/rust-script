@@ -1,5 +1,5 @@
-use ra_ap_syntax::ast::{HasAttrs, HasGenericParams, HasModuleItem, HasVisibility};
-use ra_ap_syntax::{AstNode, ast};
+use ra_ap_syntax::ast::{HasArgList, HasAttrs, HasGenericParams, HasModuleItem, HasVisibility};
+use ra_ap_syntax::{AstNode, SyntaxKind, ast};
 
 use crate::{Diagnostic, Limits, Phase};
 
@@ -16,9 +16,13 @@ pub(super) fn validate(file: &ast::SourceFile, limits: Limits) -> Result<(), Dia
         validate_function(&function, limits)?;
     }
 
-    for node in file.syntax().descendants() {
+    validate_descendants(file.syntax(), limits)
+}
+
+fn validate_descendants(root: &ra_ap_syntax::SyntaxNode, limits: Limits) -> Result<(), Diagnostic> {
+    for node in root.descendants() {
         if let Some(expr) = ast::Expr::cast(node.clone()) {
-            match expr {
+            match &expr {
                 ast::Expr::BinExpr(_)
                 | ast::Expr::BlockExpr(_)
                 | ast::Expr::BreakExpr(_)
@@ -34,6 +38,37 @@ pub(super) fn validate(file: &ast::SourceFile, limits: Limits) -> Result<(), Dia
                 | ast::Expr::TupleExpr(_)
                 | ast::Expr::WhileExpr(_) => {}
                 _ => return Err(unsupported("expression", expr.syntax())),
+            }
+            if let ast::Expr::CallExpr(call) = &expr
+                && call
+                    .arg_list()
+                    .is_some_and(|list| has_trailing_comma(list.syntax()))
+            {
+                return Err(unsupported("trailing comma", call.syntax()));
+            }
+            if let ast::Expr::MacroExpr(macro_expression) = &expr {
+                let is_statement = macro_expression
+                    .syntax()
+                    .parent()
+                    .and_then(ast::ExprStmt::cast)
+                    .is_some_and(|statement| statement.semicolon_token().is_some());
+                if !is_statement {
+                    return Err(unsupported(
+                        "println outside a terminated statement",
+                        macro_expression.syntax(),
+                    ));
+                }
+                let input = super::intrinsic::print_expression(macro_expression, limits).map_err(
+                    |mut error| {
+                        if error.span.is_none() {
+                            error.span = Some(crate::diagnostic::span(
+                                macro_expression.syntax().text_range(),
+                            ));
+                        }
+                        error
+                    },
+                )?;
+                validate_descendants(input.expression.syntax(), limits)?;
             }
         }
         if let Some(stmt) = ast::Stmt::cast(node.clone()) {
@@ -86,7 +121,24 @@ fn validate_function(function: &ast::Fn, limits: Limits) -> Result<(), Diagnosti
     if parameters > limits.max_parameters {
         return Err(unsupported("parameter limit exceeded", function.syntax()));
     }
+    if function
+        .param_list()
+        .is_some_and(|list| has_trailing_comma(list.syntax()))
+    {
+        return Err(unsupported("trailing comma", function.syntax()));
+    }
     Ok(())
+}
+
+fn has_trailing_comma(node: &ra_ap_syntax::SyntaxNode) -> bool {
+    let mut token = node.last_token().and_then(|token| token.prev_token());
+    while let Some(current) = token {
+        if !matches!(current.kind(), SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
+            return current.kind() == SyntaxKind::COMMA;
+        }
+        token = current.prev_token();
+    }
+    false
 }
 
 fn unsupported(what: &str, node: &ra_ap_syntax::SyntaxNode) -> Diagnostic {

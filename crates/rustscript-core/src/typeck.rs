@@ -10,7 +10,7 @@ use crate::checked_ir::{
     Block, CheckedProgram, Expression, ExpressionKind, Function, FunctionId, LocalId, Parameter,
     Statement,
 };
-use crate::{Diagnostic, ParsedProgram, Phase, Type, Value};
+use crate::{Diagnostic, Limits, ParsedProgram, Phase, Type, Value};
 
 struct Signature {
     name: SmolStr,
@@ -46,7 +46,8 @@ pub(crate) fn check(parsed: &ParsedProgram) -> Result<CheckedProgram, Diagnostic
             .syntax
             .body()
             .ok_or_else(|| type_error("function body is required", signature.syntax.syntax()))?;
-        let mut checker = BodyChecker::new(signature, &signatures, &function_names);
+        let mut checker =
+            BodyChecker::new(signature, &signatures, &function_names, parsed.limits());
         let checked = checker.check_block(&body)?;
         if checked.ty != signature.return_type && !checked.diverges {
             return Err(type_error(
@@ -90,6 +91,7 @@ struct BodyChecker<'a> {
     signature: &'a Signature,
     signatures: &'a [Signature],
     function_names: &'a HashMap<SmolStr, FunctionId>,
+    limits: Limits,
     scopes: Vec<HashMap<SmolStr, Binding>>,
     next_local: usize,
     loop_depth: usize,
@@ -100,6 +102,7 @@ impl<'a> BodyChecker<'a> {
         signature: &'a Signature,
         signatures: &'a [Signature],
         function_names: &'a HashMap<SmolStr, FunctionId>,
+        limits: Limits,
     ) -> Self {
         let scope = signature
             .parameters
@@ -119,6 +122,7 @@ impl<'a> BodyChecker<'a> {
             signature,
             signatures,
             function_names,
+            limits,
             scopes: vec![scope],
             next_local: signature.parameters.len(),
             loop_depth: 0,
@@ -128,37 +132,39 @@ impl<'a> BodyChecker<'a> {
     fn check_block(&mut self, block: &ast::BlockExpr) -> Result<CheckedBlock, Diagnostic> {
         self.scopes.push(HashMap::new());
         let mut statements = Vec::new();
-        let mut diverges = false;
+        let mut block_exits_early = false;
         for statement in block.statements() {
             let (checked, statement_diverges) = self.check_statement(statement)?;
             statements.push(checked);
-            diverges |= statement_diverges;
+            block_exits_early |= statement_diverges;
         }
-        let span = crate::diagnostic::span(block.syntax().text_range());
+        let span = block.syntax().text_range();
         let tail_expression = block.tail_expr();
-        let tail = match tail_expression {
+        let (tail, ty, diverges) = match tail_expression {
             Some(ast::Expr::WhileExpr(while_expression)) => {
-                let (statement, statement_diverges) = self.check_while(while_expression)?;
+                let (statement, _) = self.check_while(while_expression)?;
                 statements.push(statement);
-                diverges |= statement_diverges;
-                Some(Box::new(Expression {
+                let tail = Box::new(Expression {
                     kind: ExpressionKind::Value(Value::Unit),
                     ty: Type::Unit,
                     span,
-                }))
+                });
+                (Some(tail), Type::Unit, false)
             }
             Some(expression) => {
                 let checked = self.check_expression(expression)?;
-                diverges |= checked.diverges;
-                Some(Box::new(checked.expression))
+                let ty = checked.expression.ty;
+                (Some(Box::new(checked.expression)), ty, checked.diverges)
             }
-            None => Some(Box::new(Expression {
-                kind: ExpressionKind::Value(Value::Unit),
-                ty: Type::Unit,
-                span,
-            })),
+            None => {
+                let tail = Box::new(Expression {
+                    kind: ExpressionKind::Value(Value::Unit),
+                    ty: Type::Unit,
+                    span,
+                });
+                (Some(tail), Type::Unit, block_exits_early)
+            }
         };
-        let ty = tail.as_ref().map_or(Type::Unit, |tail| tail.ty);
         self.scopes.pop();
         Ok(CheckedBlock {
             block: Block {
@@ -187,7 +193,15 @@ impl<'a> BodyChecker<'a> {
                     {
                         self.check_assignment(binary)
                     }
-                    ast::Expr::WhileExpr(while_expression) => self.check_while(while_expression),
+                    ast::Expr::WhileExpr(while_expression) => {
+                        if expression_statement.semicolon_token().is_some() {
+                            return Err(type_error(
+                                "while statements do not take a semicolon",
+                                while_expression.syntax(),
+                            ));
+                        }
+                        self.check_while(while_expression)
+                    }
                     ast::Expr::ReturnExpr(return_expression) => {
                         self.check_return(return_expression)
                     }
@@ -207,9 +221,7 @@ impl<'a> BodyChecker<'a> {
                             ));
                         }
                         Ok((
-                            Statement::Break(crate::diagnostic::span(
-                                break_expression.syntax().text_range(),
-                            )),
+                            Statement::Break(break_expression.syntax().text_range()),
                             true,
                         ))
                     }
@@ -227,20 +239,21 @@ impl<'a> BodyChecker<'a> {
                             ));
                         }
                         Ok((
-                            Statement::Continue(crate::diagnostic::span(
-                                continue_expression.syntax().text_range(),
-                            )),
+                            Statement::Continue(continue_expression.syntax().text_range()),
                             true,
                         ))
                     }
-                    ast::Expr::MacroExpr(macro_expression) => Err(type_error(
-                        "only the exact println intrinsic is supported",
-                        macro_expression.syntax(),
-                    )),
+                    ast::Expr::MacroExpr(macro_expression) => {
+                        if expression_statement.semicolon_token().is_none() {
+                            return Err(type_error(
+                                "println must be terminated by a semicolon",
+                                macro_expression.syntax(),
+                            ));
+                        }
+                        self.check_print(macro_expression)
+                    }
                     expression => {
-                        if expression_statement.semicolon_token().is_none()
-                            && !matches!(expression, ast::Expr::BlockExpr(_) | ast::Expr::IfExpr(_))
-                        {
+                        if expression_statement.semicolon_token().is_none() {
                             return Err(type_error(
                                 "statement expression requires a semicolon",
                                 expression.syntax(),
@@ -356,7 +369,7 @@ impl<'a> BodyChecker<'a> {
             Statement::Assign {
                 id: binding.id,
                 value: checked.expression,
-                span: crate::diagnostic::span(binary.syntax().text_range()),
+                span: binary.syntax().text_range(),
             },
             checked.diverges,
         ))
@@ -385,7 +398,7 @@ impl<'a> BodyChecker<'a> {
             Statement::While {
                 condition: condition.expression,
                 body: body.block,
-                span: crate::diagnostic::span(expression.syntax().text_range()),
+                span: expression.syntax().text_range(),
             },
             condition.diverges,
         ))
@@ -395,7 +408,7 @@ impl<'a> BodyChecker<'a> {
         &mut self,
         expression: ast::ReturnExpr,
     ) -> Result<(Statement, bool), Diagnostic> {
-        let span = crate::diagnostic::span(expression.syntax().text_range());
+        let span = expression.syntax().text_range();
         let value = match expression.expr() {
             Some(value) => self.check_expression(value)?.expression,
             None => Expression {
@@ -410,8 +423,40 @@ impl<'a> BodyChecker<'a> {
         Ok((Statement::Return { value, span }, true))
     }
 
+    fn check_print(&mut self, expression: ast::MacroExpr) -> Result<(Statement, bool), Diagnostic> {
+        let macro_range = expression.syntax().text_range();
+        let input = crate::frontend::intrinsic::print_expression(&expression, self.limits)
+            .map_err(|mut error| {
+                if error.span.is_none() {
+                    error.span = Some(crate::diagnostic::span(macro_range));
+                }
+                error
+            })?;
+        let mut checked = self
+            .check_expression(input.expression)
+            .map_err(|mut error| {
+                error.span = Some(crate::diagnostic::span(input.source_range));
+                error
+            })?;
+        if !matches!(checked.expression.ty, Type::I64 | Type::Bool) {
+            return Err(Diagnostic::new(
+                Phase::Type,
+                "println value must be i64 or bool",
+                Some(crate::diagnostic::span(input.source_range)),
+            ));
+        }
+        replace_expression_ranges(&mut checked.expression, input.source_range);
+        Ok((
+            Statement::Print {
+                value: checked.expression,
+                span: macro_range,
+            },
+            checked.diverges,
+        ))
+    }
+
     fn check_expression(&mut self, expression: ast::Expr) -> Result<CheckedExpr, Diagnostic> {
-        let span = crate::diagnostic::span(expression.syntax().text_range());
+        let span = expression.syntax().text_range();
         let (kind, ty, diverges) = match expression {
             ast::Expr::Literal(literal) => match literal.kind() {
                 LiteralKind::Bool(value) => {
@@ -502,7 +547,12 @@ impl<'a> BodyChecker<'a> {
                 binary.syntax(),
             ));
         }
-        if matches!(op, BinaryOp::CmpOp(_)) && [binary.lhs(), binary.rhs()].into_iter().flatten().any(|expr| matches!(expr, ast::Expr::BinExpr(ref inner) if matches!(inner.op_kind(), Some(BinaryOp::CmpOp(_))))) { return Err(type_error("comparison chains are unsupported", binary.syntax())); }
+        if matches!(op, BinaryOp::CmpOp(_)) && has_comparison_operand(&binary) {
+            return Err(type_error(
+                "comparison chains are unsupported",
+                binary.syntax(),
+            ));
+        }
         let lhs = self.check_expression(
             binary
                 .lhs()
@@ -543,7 +593,7 @@ impl<'a> BodyChecker<'a> {
                     rhs: Box::new(rhs.expression),
                 },
                 ty,
-                span: crate::diagnostic::span(binary.syntax().text_range()),
+                span: binary.syntax().text_range(),
             },
             diverges,
         })
@@ -593,7 +643,7 @@ impl<'a> BodyChecker<'a> {
                     arguments: checked_arguments,
                 },
                 ty: signature.return_type,
-                span: crate::diagnostic::span(call.syntax().text_range()),
+                span: call.syntax().text_range(),
             },
             diverges,
         })
@@ -638,7 +688,7 @@ impl<'a> BodyChecker<'a> {
                     else_branch: else_branch.block,
                 },
                 ty,
-                span: crate::diagnostic::span(expression.syntax().text_range()),
+                span: expression.syntax().text_range(),
             },
             diverges,
         })
@@ -650,6 +700,77 @@ impl<'a> BodyChecker<'a> {
             .rev()
             .find_map(|scope| scope.get(name).copied())
     }
+}
+
+fn replace_expression_ranges(expression: &mut Expression, range: ra_ap_syntax::TextRange) {
+    expression.span = range;
+    match &mut expression.kind {
+        ExpressionKind::Value(_) | ExpressionKind::Local(_) => {}
+        ExpressionKind::Call { arguments, .. } => {
+            for argument in arguments {
+                replace_expression_ranges(argument, range);
+            }
+        }
+        ExpressionKind::Unary { operand, .. } => replace_expression_ranges(operand, range),
+        ExpressionKind::Binary { lhs, rhs, .. } => {
+            replace_expression_ranges(lhs, range);
+            replace_expression_ranges(rhs, range);
+        }
+        ExpressionKind::Block(block) => replace_block_ranges(block, range),
+        ExpressionKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            replace_expression_ranges(condition, range);
+            replace_block_ranges(then_branch, range);
+            replace_block_ranges(else_branch, range);
+        }
+    }
+}
+
+fn replace_block_ranges(block: &mut Block, range: ra_ap_syntax::TextRange) {
+    block.span = range;
+    for statement in &mut block.statements {
+        match statement {
+            Statement::Let { initializer, .. } => replace_expression_ranges(initializer, range),
+            Statement::Assign { value, span, .. } => {
+                *span = range;
+                replace_expression_ranges(value, range);
+            }
+            Statement::While {
+                condition,
+                body,
+                span,
+            } => {
+                *span = range;
+                replace_expression_ranges(condition, range);
+                replace_block_ranges(body, range);
+            }
+            Statement::Return { value, span } | Statement::Print { value, span } => {
+                *span = range;
+                replace_expression_ranges(value, range);
+            }
+            Statement::Break(span) | Statement::Continue(span) => *span = range,
+            Statement::Expression(expression) => replace_expression_ranges(expression, range),
+        }
+    }
+    if let Some(tail) = &mut block.tail {
+        replace_expression_ranges(tail, range);
+    }
+}
+
+fn has_comparison_operand(binary: &ast::BinExpr) -> bool {
+    [binary.lhs(), binary.rhs()]
+        .into_iter()
+        .flatten()
+        .any(|expr| {
+            matches!(
+                expr,
+                ast::Expr::BinExpr(ref inner)
+                    if matches!(inner.op_kind(), Some(BinaryOp::CmpOp(_)))
+            )
+        })
 }
 
 fn bare_path_name(path: &ast::PathExpr) -> Option<SmolStr> {
@@ -763,19 +884,28 @@ fn parse_type(
 ) -> Result<Type, Diagnostic> {
     let ty = ty.ok_or_else(|| type_error("type annotation is required", fallback))?;
     match ty {
-        ast::Type::PathType(path) => match path
-            .path()
-            .and_then(|path| path.segment())
-            .and_then(|segment| segment.name_ref())
-            .map(|name| SmolStr::new(name.text()))
-        {
-            Some(name) if name == "i64" => Ok(Type::I64),
-            Some(name) if name == "bool" => Ok(Type::Bool),
-            _ => Err(type_error(
-                "only i64, bool, and () types are supported",
-                ty.syntax(),
-            )),
-        },
+        ast::Type::PathType(path_type) => {
+            let name = path_type.path().and_then(|path| {
+                if path.qualifier().is_some() || path.coloncolon_token().is_some() {
+                    return None;
+                }
+                let segment = path.segment()?;
+                if segment.generic_arg_list().is_some()
+                    || segment.parenthesized_arg_list().is_some()
+                {
+                    return None;
+                }
+                Some(SmolStr::new(segment.name_ref()?.text()))
+            });
+            match name.as_deref() {
+                Some("i64") => Ok(Type::I64),
+                Some("bool") => Ok(Type::Bool),
+                _ => Err(type_error(
+                    "only i64, bool, and () types are supported",
+                    ty.syntax(),
+                )),
+            }
+        }
         ast::Type::TupleType(tuple) if tuple.fields().next().is_none() => Ok(Type::Unit),
         _ => Err(type_error(
             "only i64, bool, and () types are supported",
@@ -792,7 +922,69 @@ fn validate_function_name(name: &str, function: &ast::Fn) -> Result<(), Diagnost
 }
 
 fn validate_binding_name(name: &str, node: &ra_ap_syntax::SyntaxNode) -> Result<(), Diagnostic> {
-    const RESERVED: &[&str] = &["_", "i64", "bool", "println", "main"];
+    const RESERVED: &[&str] = &[
+        "_",
+        "as",
+        "async",
+        "await",
+        "break",
+        "const",
+        "continue",
+        "crate",
+        "dyn",
+        "else",
+        "enum",
+        "extern",
+        "false",
+        "fn",
+        "for",
+        "if",
+        "impl",
+        "in",
+        "let",
+        "loop",
+        "match",
+        "mod",
+        "move",
+        "mut",
+        "pub",
+        "ref",
+        "return",
+        "self",
+        "Self",
+        "static",
+        "struct",
+        "super",
+        "trait",
+        "true",
+        "type",
+        "unsafe",
+        "use",
+        "where",
+        "while",
+        "abstract",
+        "become",
+        "box",
+        "do",
+        "final",
+        "gen",
+        "macro",
+        "override",
+        "priv",
+        "try",
+        "typeof",
+        "unsized",
+        "virtual",
+        "yield",
+        "macro_rules",
+        "raw",
+        "safe",
+        "union",
+        "i64",
+        "bool",
+        "println",
+        "main",
+    ];
     if RESERVED.contains(&name) {
         return Err(type_error("reserved identifier", node));
     }

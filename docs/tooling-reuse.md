@@ -1,21 +1,78 @@
 # Rust tooling reuse audit
 
-| Need | Reused API | Rustscript-specific code |
+The frontend keeps rust-analyzer's lossless syntax tree until checking has
+resolved names and lowered directly to compact executable IR. There is no
+project token model, parser cursor, syntax AST, precedence table, or line index.
+
+| Need | Reused API | Rustscript-specific policy |
 | --- | --- | --- |
-| Rust token boundaries | `ra_ap_parser::LexedStr` | Bounded subset policy over token kinds/text |
-| Rust 2024 parsing | `ra_ap_syntax::SourceFile::parse` | Panic containment on unwind targets |
-| Parser errors | `Parse::errors` and `SyntaxKind::ERROR` | Stable diagnostic conversion |
-| Typed syntax | `ra_ap_syntax::ast` and `AstNode` | Strict subset admission and checked-IR lowering |
-| Operators | Typed AST `op_kind` APIs | Subset type rules only |
-| Source ranges | `TextRange` and `TextSize` | Public `Span` conversion |
+| Rust token boundaries and errors | `ra_ap_parser::LexedStr` in `Edition2024` | Bounded whitelist over lexer-provided kinds, text, and ranges |
+| Rust 2024 parsing | `ra_ap_syntax::SourceFile::parse` | Native unwind containment and strict rejection of parser errors/recovery nodes |
+| Parser validation | `Parse::errors`, `SyntaxKind::ERROR` | Stable diagnostic conversion |
+| Typed syntax admission | `ast::Item`, `ast::Stmt`, `ast::Expr`, `ast::Type`, `ast::Pat`, and AST traits | Exhaustive strict-subset admission |
+| Operator identity and precedence | `PrefixExpr::op_kind`, `BinExpr::op_kind`, and rust-analyzer operator enums/tree shape | Three-type operator rules; no precedence implementation |
+| Macro envelope | `MacroCall` path accessors and `TokenTree::token_trees_and_tokens` | Exact `println!("{}", expression)` policy |
+| Macro value expression | A bounded wrapper parsed only by `SourceFile::parse` | Required because macro token trees are opaque; no token-tree expression parser is implemented |
+| Source ranges | `TextRange` and `TextSize` | Conversion to public inclusive-exclusive `Span` only at diagnostics/API boundaries |
 | Lines and columns | `line_index::LineIndex` | One-based public location conversion |
-| Canonical output | No stable general Rust formatter fits the WASM/resource contract | Small emitter over checked IR only |
+| Syntax limits | `preorder_with_tokens` and `WalkEvent` | Element/depth counters and configured bounds |
+| Syntax debug output | Alternate `Debug` for the pinned rust-analyzer syntax node | Public wrapper keeps rust-analyzer types private |
+| Parse-stage canonical output | Typed rust-analyzer `ast::*` nodes and operator enums | Small subset emitter for `format_program`; discards trivia and emits only admitted forms |
+| Checked/generated canonical output | Checked executable IR plus rust-analyzer operator enums retained during lowering | Small checked-IR emitter for generation, reduction, and differential tests |
+| Generated/reduced programs | Checked executable IR plus the shared emitter | Typed deterministic decisions and type-preserving reduction candidates |
+
+The macro-expression wrapper is the only extra parse. Its envelope is first
+validated from rust-analyzer token-tree elements; its bounded contents are then
+embedded in a fixed function/`let` wrapper and parsed through
+`SourceFile::parse`. This avoids the prohibited `TopEntryPoint` macro parser and
+avoids a handwritten expression grammar. Wrapper ranges are mapped back to the
+original token-tree expression range before checked IR is retained.
 
 ## Compiler-semantics reuse gate
 
-The matching rust-analyzer HIR stack is not embedded. Its database/channel and
-parallel-runtime transitive architecture is substantially larger than the
-syntax crates, does not provide a small standalone three-type checker API, and
-would require host-oriented runtime services incompatible with the bounded
-browser core. The project therefore uses the issue's permitted minimal checker.
-This decision must be revisited with every rust-analyzer dependency upgrade.
+The matching rust-analyzer semantic stack was evaluated on 2026-07-18 with an
+ephemeral crate containing exact `=0.0.342` dependencies on
+`ra_ap_base_db`, `ra_ap_hir`, and `ra_ap_hir_ty`:
+
+```text
+cargo info ra_ap_base_db@0.0.342
+cargo info ra_ap_hir@0.0.342
+cargo info ra_ap_hir_ty@0.0.342
+cargo tree --target wasm32-unknown-unknown
+cargo metadata --format-version 1 --filter-platform wasm32-unknown-unknown
+RUSTFLAGS='--cfg no_salsa_async_drops' cargo check --target wasm32-unknown-unknown
+```
+
+The dependency-only WASM check succeeded in 13.54 seconds, so compilation alone
+is not the blocker. The three-crate spike resolved 130 packages. Inspection of
+the published primary crate manifests and resulting graph found:
+
+- `ra_ap_base_db` and `ra_ap_hir_ty` enable Salsa's `rayon` and
+  `salsa_unstable` features;
+- the target graph includes Rayon, Crossbeam queues/channels, `jod-thread`,
+  `thread_local`, DashMap, parking-lot synchronization, VFS/path infrastructure,
+  tracing subscribers, and rustc trait-solver crates;
+- the concrete `RootDatabase` is supplied by the additional `ra_ap_ide_db`
+  crate, not by the three semantic crates;
+- a single file must still be installed into VFS/source-root/crate-graph state,
+  including crate/proc-macro configuration, before `Semantics::type_of_expr`
+  can resolve locals and calls;
+- a link-only WASM build does not establish browser execution, absence of
+  background/thread paths, deterministic bounded work, or sufficient
+  diagnostics for every subset rule.
+
+That integration therefore fails the issue's size, runtime-service,
+determinism/resource-bound, and small-public-API criteria even though its crates
+compile for the target. Shipping it would add a large database/runtime beside
+the subset checks rather than replace them. Rustscript consequently implements
+only the permitted lexical-scope checker for `i64`, `bool`, and `()`. Repeat
+this measurement, including browser execution, on every rust-analyzer upgrade.
+
+## Version-coupled WASM detail
+
+`ra_ap_syntax = 0.0.342` recognizes `no_salsa_async_drops`. The committed
+`.cargo/config.toml` sets it only for `wasm32-unknown-unknown`, selecting
+synchronous parse-result dropping. WASM tests repeatedly parse valid/invalid
+programs, obtain syntax/error results, and drop them. Revalidate the cfg in the
+dependency source and rerun the browser/Node tests whenever the exact
+rust-analyzer pins change.

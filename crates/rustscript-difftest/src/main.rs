@@ -4,7 +4,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use rustscript_difftest::{
-    RustcOracle, replay_source, run_case, write_failure_artifact, write_success_artifact,
+    RustcOracle, minimize_failure, replay_source, run_case, write_failure_artifact,
+    write_success_artifact,
 };
 
 struct Arguments {
@@ -42,7 +43,10 @@ fn run(arguments: Arguments) -> Result<(), String> {
                 println!("replay passed: {} steps", success.steps);
                 Ok(())
             }
-            Err(failure) => report_failure(&failure, &artifact_root),
+            Err(mut failure) => {
+                minimize_failure(&mut failure, &oracle);
+                report_failure(&failure, &artifact_root)
+            }
         }
     } else {
         let cases: Box<dyn Iterator<Item = usize>> = match arguments.case {
@@ -59,7 +63,10 @@ fn run(arguments: Arguments) -> Result<(), String> {
                     }
                     completed += 1;
                 }
-                Err(failure) => return report_failure(&failure, &artifact_root),
+                Err(mut failure) => {
+                    minimize_failure(&mut failure, &oracle);
+                    return report_failure(&failure, &artifact_root);
+                }
             }
         }
         println!(

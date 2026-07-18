@@ -57,41 +57,52 @@ fn run_cli(arguments: Vec<std::ffi::OsString>) -> Result<(), CliError> {
     let display_path = path.display().to_string();
     let parsed = rustscript_core::parse_bytes(&source, Limits::default()).map_err(|error| {
         CliError::Diagnostic(Box::new(DiagnosticReport {
-            error,
-            source: source.clone(),
-            path: display_path.clone(),
-        }))
-    })?;
-    let checked = rustscript_core::check(&parsed).map_err(|error| {
-        CliError::Diagnostic(Box::new(DiagnosticReport {
-            error,
+            error: error.with_file_name(display_path.clone()),
             source: source.clone(),
             path: display_path.clone(),
         }))
     })?;
     let mut stdout = io::stdout().lock();
+    if operation == "ast" {
+        stdout
+            .write_all(rustscript_core::debug_syntax(&parsed).as_bytes())
+            .map_err(CliError::Io)?;
+        stdout.write_all(b"\n").map_err(CliError::Io)?;
+        return stdout.flush().map_err(CliError::Io);
+    }
+    if operation == "fmt" {
+        stdout
+            .write_all(rustscript_core::format_program(&parsed).as_bytes())
+            .map_err(CliError::Io)?;
+        return stdout.flush().map_err(CliError::Io);
+    }
+    let checked = rustscript_core::check(&parsed).map_err(|errors| {
+        errors.into_iter().next().map_or_else(
+            || CliError::Io(io::Error::other("checker returned no diagnostic")),
+            |error| {
+                CliError::Diagnostic(Box::new(DiagnosticReport {
+                    error: error.with_file_name(display_path.clone()),
+                    source: source.clone(),
+                    path: display_path.clone(),
+                }))
+            },
+        )
+    })?;
     match operation {
         "check" => {}
         "run" => {
             let execution =
                 rustscript_core::run(&checked, RuntimeLimits::default()).map_err(|error| {
                     CliError::Diagnostic(Box::new(DiagnosticReport {
-                        error,
+                        error: error.with_file_name(display_path.clone()),
                         source: source.clone(),
-                        path: display_path,
+                        path: display_path.clone(),
                     }))
                 })?;
-            stdout.write_all(&execution.output).map_err(CliError::Io)?;
+            stdout.write_all(&execution.stdout).map_err(CliError::Io)?;
         }
-        "ast" => {
-            stdout
-                .write_all(rustscript_core::debug_ir(&checked).as_bytes())
-                .map_err(CliError::Io)?;
-            stdout.write_all(b"\n").map_err(CliError::Io)?;
-        }
-        "fmt" => stdout
-            .write_all(rustscript_core::format(&checked).as_bytes())
-            .map_err(CliError::Io)?,
+        "ast" => return Err(CliError::Usage("unknown operation")),
+        "fmt" => return Err(CliError::Usage("unknown operation")),
         _ => return Err(CliError::Usage("unknown operation")),
     }
     stdout.flush().map_err(CliError::Io)

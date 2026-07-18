@@ -4,7 +4,7 @@ use rustscript_core::{Diagnostic, Limits, Location, RuntimeLimits};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
-#[derive(Clone, Copy, Deserialize, Default)]
+#[derive(Clone, Copy, Deserialize, Serialize, Default)]
 struct Options {
     #[serde(default)]
     frontend: Limits,
@@ -12,7 +12,7 @@ struct Options {
     runtime: RuntimeLimits,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct Response {
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -25,7 +25,7 @@ struct Response {
     error: Option<WasmDiagnostic>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 struct WasmDiagnostic {
     #[serde(flatten)]
     diagnostic: Diagnostic,
@@ -92,21 +92,47 @@ fn respond(source: &str, options: JsValue, operation: Operation) -> Result<JsVal
     } else {
         serde_wasm_bindgen::from_value(options).map_err(js_error)?
     };
-    let response = match rustscript_core::check_source(source, options.frontend) {
+    let response = match rustscript_core::parse(source, options.frontend) {
         Err(error) => Response::failure(source, error),
-        Ok(program) => match operation {
-            Operation::Check => Response::success(None, None, None),
+        Ok(parsed) => match operation {
             Operation::Ast => {
-                Response::success(Some(rustscript_core::debug_ir(&program)), None, None)
+                Response::success(Some(rustscript_core::debug_syntax(&parsed)), None, None)
             }
             Operation::Format => {
-                Response::success(Some(rustscript_core::format(&program)), None, None)
+                Response::success(Some(rustscript_core::format_program(&parsed)), None, None)
             }
-            Operation::Run => match rustscript_core::run(&program, options.runtime) {
-                Ok(execution) => {
-                    Response::success(None, Some(execution.output), Some(execution.steps))
-                }
-                Err(error) => Response::failure(source, error),
+            Operation::Check | Operation::Run => match rustscript_core::check(&parsed) {
+                Err(errors) => errors.into_iter().next().map_or_else(
+                    || {
+                        Response::failure(
+                            source,
+                            Diagnostic {
+                                phase: rustscript_core::Phase::Type,
+                                message: "checker returned no diagnostic".into(),
+                                span: None,
+                                file_name: None,
+                            },
+                        )
+                    },
+                    |error| Response::failure(source, error),
+                ),
+                Ok(program) => match operation {
+                    Operation::Check => Response::success(None, None, None),
+                    Operation::Run => match rustscript_core::run(&program, options.runtime) {
+                        Ok(execution) => {
+                            Response::success(None, Some(execution.stdout), Some(execution.steps))
+                        }
+                        Err(error) => Response::failure(source, error),
+                    },
+                    Operation::Ast => {
+                        Response::success(Some(rustscript_core::debug_syntax(&parsed)), None, None)
+                    }
+                    Operation::Format => Response::success(
+                        Some(rustscript_core::format_program(&parsed)),
+                        None,
+                        None,
+                    ),
+                },
             },
         },
     };
@@ -136,14 +162,60 @@ mod tests {
 
     #[wasm_bindgen_test]
     fn executes_formats_and_is_deterministic() {
-        let source = "fn main() { let mut x = 0_i64; while x < 3_i64 { x = x + 1_i64; } }";
+        let source = "fn main() { let mut x = 0_i64; while x < 3_i64 { x = x + 1_i64; } println!(\"{}\", x); }";
         let first = response(run(source, JsValue::NULL).unwrap());
         let second = response(run(source, JsValue::NULL).unwrap());
         assert!(first.ok);
+        assert_eq!(first.output, Some(b"3\n".to_vec()));
         assert_eq!(first.output, second.output);
         assert_eq!(first.steps, second.steps);
         let formatted = response(format(source, JsValue::NULL).unwrap());
         assert!(formatted.ok);
         assert!(formatted.text.is_some());
+        let formatted_type_invalid =
+            response(format("fn main(){let value: bool = 1_i64;}", JsValue::NULL).unwrap());
+        assert_eq!(
+            formatted_type_invalid.text,
+            Some("fn main() {\n    let value: bool = 1_i64;\n}\n".into())
+        );
+        let syntax = response(ast(source, JsValue::NULL).unwrap());
+        assert!(syntax.text.is_some_and(|text| text.contains("SOURCE_FILE")));
+    }
+
+    #[wasm_bindgen_test]
+    fn returns_structured_diagnostics_and_enforces_limits() {
+        let invalid = response(check("fn main() {\n missing;\n}", JsValue::NULL).unwrap());
+        let diagnostic = invalid.error.expect("diagnostic");
+        assert_eq!(diagnostic.diagnostic.phase, rustscript_core::Phase::Type);
+        assert_eq!(diagnostic.location, Some(Location { line: 2, column: 2 }));
+
+        let fuel_options = serde_wasm_bindgen::to_value(&Options {
+            frontend: Limits::default(),
+            runtime: RuntimeLimits {
+                fuel: 8,
+                ..RuntimeLimits::default()
+            },
+        })
+        .unwrap();
+        let fuel = response(run("fn main() { while true {} }", fuel_options).unwrap());
+        assert_eq!(
+            fuel.error.expect("fuel error").diagnostic.message,
+            "fuel exhausted"
+        );
+
+        let output_options = serde_wasm_bindgen::to_value(&Options {
+            frontend: Limits::default(),
+            runtime: RuntimeLimits {
+                max_output_bytes: 1,
+                ..RuntimeLimits::default()
+            },
+        })
+        .unwrap();
+        let output =
+            response(run("fn main() { println!(\"{}\", true); }", output_options).unwrap());
+        assert_eq!(
+            output.error.expect("output error").diagnostic.message,
+            "output byte limit exceeded"
+        );
     }
 }

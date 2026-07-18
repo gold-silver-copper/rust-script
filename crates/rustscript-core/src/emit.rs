@@ -1,7 +1,11 @@
-use ra_ap_syntax::ast::{BinaryOp, CmpOp, LogicOp, Ordering, UnaryOp};
+use ra_ap_syntax::ast::{
+    BinaryOp, CmpOp, HasArgList, HasGenericArgs, HasLoopBody, HasModuleItem, HasName, LiteralKind,
+    LogicOp, Ordering, UnaryOp,
+};
+use ra_ap_syntax::{AstToken, ast};
 
 use crate::checked_ir::{Block, Expression, ExpressionKind, Function, Statement};
-use crate::{CheckedProgram, Type, Value};
+use crate::{CheckedProgram, Limits, ParsedProgram, Type, Value};
 
 pub(crate) fn format(program: &CheckedProgram) -> String {
     let mut emitter = Emitter {
@@ -16,6 +20,375 @@ pub(crate) fn format(program: &CheckedProgram) -> String {
         emitter.function(function);
     }
     emitter.output
+}
+
+pub(crate) fn format_parsed(program: &ParsedProgram) -> String {
+    let mut emitter = SyntaxEmitter {
+        output: String::new(),
+        limits: program.limits(),
+    };
+    for (index, item) in program.file().items().enumerate() {
+        if index != 0 {
+            emitter.output.push('\n');
+        }
+        if let ast::Item::Fn(function) = item {
+            emitter.function(function);
+        }
+    }
+    emitter.output
+}
+
+struct SyntaxEmitter {
+    output: String,
+    limits: Limits,
+}
+
+impl SyntaxEmitter {
+    fn function(&mut self, function: ast::Fn) {
+        self.output.push_str("fn ");
+        if let Some(name) = function.name() {
+            self.output.push_str(&name.text());
+        } else {
+            self.output.push_str("__missing_name");
+        }
+        self.output.push('(');
+        if let Some(parameters) = function.param_list() {
+            for (index, parameter) in parameters.params().enumerate() {
+                if index != 0 {
+                    self.output.push_str(", ");
+                }
+                self.parameter(parameter);
+            }
+        }
+        self.output.push(')');
+        if let Some(ret_type) = function.ret_type() {
+            self.output.push_str(" -> ");
+            self.ty(ret_type.ty().as_ref());
+        }
+        self.output.push(' ');
+        if let Some(body) = function.body() {
+            self.block(body, 0);
+        } else {
+            self.output.push_str("{}");
+        }
+        self.output.push('\n');
+    }
+
+    fn parameter(&mut self, parameter: ast::Param) {
+        self.pattern_name(parameter.pat().as_ref());
+        self.output.push_str(": ");
+        self.ty(parameter.ty().as_ref());
+    }
+
+    fn block(&mut self, block: ast::BlockExpr, indent: usize) {
+        self.output.push('{');
+        let statements: Vec<_> = block.statements().collect();
+        let tail = block.tail_expr();
+        if statements.is_empty() && is_syntax_implicit_unit(tail.as_ref()) {
+            self.output.push('}');
+            return;
+        }
+
+        self.output.push('\n');
+        for statement in statements {
+            self.indent(indent + 1);
+            self.statement(statement, indent + 1);
+            self.output.push('\n');
+        }
+        if let Some(ast::Expr::WhileExpr(while_expression)) = tail.clone() {
+            self.indent(indent + 1);
+            self.while_statement(while_expression, indent + 1);
+            self.output.push('\n');
+        } else if let Some(tail) = tail
+            && !is_syntax_implicit_unit(Some(&tail))
+        {
+            self.indent(indent + 1);
+            self.expression(tail, indent + 1);
+            self.output.push('\n');
+        }
+        self.indent(indent);
+        self.output.push('}');
+    }
+
+    fn statement(&mut self, statement: ast::Stmt, indent: usize) {
+        match statement {
+            ast::Stmt::LetStmt(statement) => self.let_statement(statement, indent),
+            ast::Stmt::ExprStmt(statement) => {
+                if let Some(expression) = statement.expr() {
+                    match expression {
+                        ast::Expr::BinExpr(binary)
+                            if matches!(
+                                binary.op_kind(),
+                                Some(BinaryOp::Assignment { op: None })
+                            ) =>
+                        {
+                            self.assignment(binary, indent);
+                        }
+                        ast::Expr::WhileExpr(while_expression) => {
+                            self.while_statement(while_expression, indent);
+                        }
+                        ast::Expr::ReturnExpr(return_expression) => {
+                            self.return_statement(return_expression, indent);
+                        }
+                        ast::Expr::BreakExpr(_) => self.output.push_str("break;"),
+                        ast::Expr::ContinueExpr(_) => self.output.push_str("continue;"),
+                        ast::Expr::MacroExpr(macro_expression) => {
+                            self.print_statement(macro_expression, indent);
+                        }
+                        expression => {
+                            self.expression(expression, indent);
+                            self.output.push(';');
+                        }
+                    }
+                }
+            }
+            ast::Stmt::Item(_) => {}
+        }
+    }
+
+    fn let_statement(&mut self, statement: ast::LetStmt, indent: usize) {
+        self.output.push_str("let ");
+        if let Some(ast::Pat::IdentPat(pattern)) = statement.pat() {
+            if pattern.mut_token().is_some() {
+                self.output.push_str("mut ");
+            }
+            if let Some(name) = pattern.name() {
+                self.output.push_str(&name.text());
+            } else {
+                self.output.push_str("__missing_name");
+            }
+        } else {
+            self.output.push_str("__missing_name");
+        }
+        if let Some(ty) = statement.ty() {
+            self.output.push_str(": ");
+            self.ty(Some(&ty));
+        }
+        self.output.push_str(" = ");
+        if let Some(initializer) = statement.initializer() {
+            self.expression(initializer, indent);
+        } else {
+            self.output.push_str("()");
+        }
+        self.output.push(';');
+    }
+
+    fn assignment(&mut self, binary: ast::BinExpr, indent: usize) {
+        if let Some(ast::Expr::PathExpr(path)) = binary.lhs() {
+            self.path_name(path);
+        } else {
+            self.output.push_str("__missing_name");
+        }
+        self.output.push_str(" = ");
+        if let Some(rhs) = binary.rhs() {
+            self.expression(rhs, indent);
+        } else {
+            self.output.push_str("()");
+        }
+        self.output.push(';');
+    }
+
+    fn while_statement(&mut self, expression: ast::WhileExpr, indent: usize) {
+        self.output.push_str("while ");
+        if let Some(condition) = expression.condition() {
+            self.expression(condition, indent);
+        } else {
+            self.output.push_str("false");
+        }
+        self.output.push(' ');
+        if let Some(body) = expression.loop_body() {
+            self.block(body, indent);
+        } else {
+            self.output.push_str("{}");
+        }
+    }
+
+    fn return_statement(&mut self, expression: ast::ReturnExpr, indent: usize) {
+        self.output.push_str("return");
+        if let Some(value) = expression.expr() {
+            self.output.push(' ');
+            self.expression(value, indent);
+        }
+        self.output.push(';');
+    }
+
+    fn print_statement(&mut self, expression: ast::MacroExpr, indent: usize) {
+        self.output.push_str("println!(\"{}\", ");
+        if let Ok(input) = crate::frontend::intrinsic::print_expression(&expression, self.limits) {
+            self.expression(input.expression, indent);
+        } else {
+            self.output.push_str("()");
+        }
+        self.output.push_str(");");
+    }
+
+    fn expression(&mut self, expression: ast::Expr, indent: usize) {
+        match expression {
+            ast::Expr::Literal(literal) => match literal.kind() {
+                LiteralKind::Bool(value) => {
+                    self.output.push_str(if value { "true" } else { "false" })
+                }
+                LiteralKind::IntNumber(number) => self.output.push_str(number.syntax().text()),
+                _ => self.output.push_str("()"),
+            },
+            ast::Expr::TupleExpr(tuple) if tuple.fields().next().is_none() => {
+                self.output.push_str("()");
+            }
+            ast::Expr::ParenExpr(paren) => {
+                if let Some(inner) = paren.expr() {
+                    self.expression(inner, indent);
+                } else {
+                    self.output.push_str("()");
+                }
+            }
+            ast::Expr::PathExpr(path) => self.path_name(path),
+            ast::Expr::PrefixExpr(prefix) => {
+                self.output.push('(');
+                self.output.push_str(match prefix.op_kind() {
+                    Some(UnaryOp::Neg) => "-",
+                    Some(UnaryOp::Not) => "!",
+                    Some(UnaryOp::Deref) | None => "__unsupported_unary",
+                });
+                if let Some(operand) = prefix.expr() {
+                    self.expression(operand, indent);
+                } else {
+                    self.output.push_str("()");
+                }
+                self.output.push(')');
+            }
+            ast::Expr::BinExpr(binary) => {
+                self.output.push('(');
+                if let Some(lhs) = binary.lhs() {
+                    self.expression(lhs, indent);
+                } else {
+                    self.output.push_str("()");
+                }
+                self.output.push(' ');
+                self.output.push_str(
+                    binary
+                        .op_kind()
+                        .map_or("__unsupported_operator", binary_text),
+                );
+                self.output.push(' ');
+                if let Some(rhs) = binary.rhs() {
+                    self.expression(rhs, indent);
+                } else {
+                    self.output.push_str("()");
+                }
+                self.output.push(')');
+            }
+            ast::Expr::CallExpr(call) => self.call_expression(call, indent),
+            ast::Expr::BlockExpr(block) => self.block(block, indent),
+            ast::Expr::IfExpr(if_expression) => self.if_expression(if_expression, indent),
+            _ => self.output.push_str("()"),
+        }
+    }
+
+    fn call_expression(&mut self, call: ast::CallExpr, indent: usize) {
+        if let Some(ast::Expr::PathExpr(path)) = call.expr() {
+            self.path_name(path);
+        } else {
+            self.output.push_str("__missing_function");
+        }
+        self.output.push('(');
+        if let Some(arguments) = call.arg_list() {
+            for (index, argument) in arguments.args().enumerate() {
+                if index != 0 {
+                    self.output.push_str(", ");
+                }
+                self.expression(argument, indent);
+            }
+        }
+        self.output.push(')');
+    }
+
+    fn if_expression(&mut self, expression: ast::IfExpr, indent: usize) {
+        self.output.push_str("(if ");
+        if let Some(condition) = expression.condition() {
+            self.expression(condition, indent);
+        } else {
+            self.output.push_str("false");
+        }
+        self.output.push(' ');
+        if let Some(then_branch) = expression.then_branch() {
+            self.block(then_branch, indent);
+        } else {
+            self.output.push_str("{}");
+        }
+        self.output.push_str(" else ");
+        match expression.else_branch() {
+            Some(ast::ElseBranch::Block(block)) => self.block(block, indent),
+            _ => self.output.push_str("{}"),
+        }
+        self.output.push(')');
+    }
+
+    fn ty(&mut self, ty: Option<&ast::Type>) {
+        match ty {
+            Some(ast::Type::PathType(path)) => {
+                if let Some(name) = path.path().and_then(|path| {
+                    if path.qualifier().is_some() || path.coloncolon_token().is_some() {
+                        return None;
+                    }
+                    let segment = path.segment()?;
+                    if segment.generic_arg_list().is_some()
+                        || segment.parenthesized_arg_list().is_some()
+                    {
+                        return None;
+                    }
+                    segment.name_ref().map(|name| name.text().to_string())
+                }) {
+                    self.output.push_str(&name);
+                } else {
+                    self.output.push_str("__unsupported_type");
+                }
+            }
+            Some(ast::Type::TupleType(tuple)) if tuple.fields().next().is_none() => {
+                self.output.push_str("()");
+            }
+            _ => self.output.push_str("__unsupported_type"),
+        }
+    }
+
+    fn pattern_name(&mut self, pattern: Option<&ast::Pat>) {
+        if let Some(ast::Pat::IdentPat(pattern)) = pattern {
+            if let Some(name) = pattern.name() {
+                self.output.push_str(&name.text());
+            } else {
+                self.output.push_str("__missing_name");
+            }
+        } else {
+            self.output.push_str("__missing_name");
+        }
+    }
+
+    fn path_name(&mut self, path: ast::PathExpr) {
+        let name = path.path().and_then(|path| {
+            if path.qualifier().is_some() || path.coloncolon_token().is_some() {
+                return None;
+            }
+            let segment = path.segment()?;
+            if segment.generic_arg_list().is_some() || segment.parenthesized_arg_list().is_some() {
+                return None;
+            }
+            segment.name_ref().map(|name| name.text().to_string())
+        });
+        self.output
+            .push_str(name.as_deref().unwrap_or("__unsupported_path"));
+    }
+
+    fn indent(&mut self, depth: usize) {
+        for _ in 0..depth {
+            self.output.push_str("    ");
+        }
+    }
+}
+
+fn is_syntax_implicit_unit(expression: Option<&ast::Expr>) -> bool {
+    matches!(
+        expression,
+        Some(ast::Expr::TupleExpr(tuple)) if tuple.fields().next().is_none()
+    )
 }
 
 struct Emitter<'a> {
@@ -122,6 +495,11 @@ impl Emitter<'_> {
                     self.expression(value, indent);
                 }
                 self.output.push(';');
+            }
+            Statement::Print { value, .. } => {
+                self.output.push_str("println!(\"{}\", ");
+                self.expression(value, indent);
+                self.output.push_str(");");
             }
             Statement::Break(_) => self.output.push_str("break;"),
             Statement::Continue(_) => self.output.push_str("continue;"),
