@@ -16,7 +16,22 @@ pub(super) fn validate(source: &str, limits: Limits) -> Result<(), Diagnostic> {
     for index in 0..lexed.len() {
         let kind = lexed.kind(index);
         let text = lexed.text(index);
-        validate_token(kind, text, lexed.text_range(index))?;
+        if matches!(kind, T![&] | T![|]) {
+            let paired_before = index > 0
+                && lexed.kind(index - 1) == kind
+                && lexed.text_range(index - 1).end == lexed.text_range(index).start;
+            let paired_after = index + 1 < lexed.len()
+                && lexed.kind(index + 1) == kind
+                && lexed.text_range(index).end == lexed.text_range(index + 1).start;
+            if !paired_before && !paired_after {
+                return Err(error(
+                    "single `&` and `|` operators are unsupported",
+                    lexed.text_range(index),
+                ));
+            }
+        } else {
+            validate_token(kind, text, lexed.text_range(index))?;
+        }
         match kind {
             T!['('] | T!['{'] => {
                 delimiters.push((kind, lexed.text_range(index)));
