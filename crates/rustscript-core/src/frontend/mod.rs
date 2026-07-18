@@ -1,3 +1,4 @@
+mod admit;
 mod bytes;
 mod lex_policy;
 
@@ -43,6 +44,7 @@ pub(crate) fn parse(bytes: &[u8], limits: Limits) -> Result<ParsedProgram, Diagn
     }
     let file = parsed.tree();
     validate_tree(&file, limits)?;
+    admit::validate(&file, limits)?;
     Ok(ParsedProgram {
         line_index: LineIndex::new(&source),
         source,
