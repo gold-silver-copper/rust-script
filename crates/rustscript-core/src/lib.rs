@@ -44,3 +44,13 @@ pub fn run(program: &CheckedProgram, limits: RuntimeLimits) -> Result<Execution,
 pub fn format(program: &CheckedProgram) -> String {
     emit::format(program)
 }
+
+/// Return a stable-for-this-build debug representation of checked executable IR.
+pub fn debug_ir(program: &CheckedProgram) -> String {
+    format!("{program:#?}")
+}
+
+/// Lazily resolve a diagnostic's source location without reparsing the program.
+pub fn locate(source: &str, diagnostic: &Diagnostic) -> Option<Location> {
+    diagnostic.location(&line_index::LineIndex::new(source))
+}
