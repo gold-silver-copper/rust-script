@@ -52,27 +52,45 @@ the published primary crate manifests and resulting graph found:
 - the target graph includes Rayon, Crossbeam queues/channels, `jod-thread`,
   `thread_local`, DashMap, parking-lot synchronization, VFS/path infrastructure,
   tracing subscribers, and rustc trait-solver crates;
-- the concrete `RootDatabase` is supplied by the additional `ra_ap_ide_db`
-  crate, not by the three semantic crates;
-- a single file must still be installed into VFS/source-root/crate-graph state,
-  including crate/proc-macro configuration, before `Semantics::type_of_expr`
-  can resolve locals and calls;
+- the concrete `RootDatabase` needed by the documented `Semantics` examples is
+  supplied by the additional `ra_ap_ide_db` crate, not by the three semantic
+  crates;
+- the first concrete API blocker was constructing an in-memory `RootDatabase`
+  for one Edition 2024 file without bringing in IDE/VFS/crate-graph and
+  proc-macro configuration state. The attempted shape was:
+
+```rust
+let source = r#"fn main() { let value = 1_i64; value; }"#;
+let parse = ra_ap_syntax::SourceFile::parse(source, Edition::Edition2024);
+// Desired next step: Semantics::type_of_expr on the local path expression.
+// Blocker: no small public constructor exists for the required database/input
+// state in ra_ap_hir/ra_ap_hir_ty alone.
+```
+
+- a single file must therefore still be installed into VFS/source-root/crate
+  graph state before `Semantics::type_of_expr` can resolve locals and calls;
 - a link-only WASM build does not establish browser execution, absence of
   background/thread paths, deterministic bounded work, or sufficient
   diagnostics for every subset rule.
 
-That integration therefore fails the issue's size, runtime-service,
-determinism/resource-bound, and small-public-API criteria even though its crates
-compile for the target. Shipping it would add a large database/runtime beside
-the subset checks rather than replace them. Rustscript consequently implements
-only the permitted lexical-scope checker for `i64`, `bool`, and `()`. Repeat
-this measurement, including browser execution, on every rust-analyzer upgrade.
+Because the small in-memory API path failed before a runnable semantic adapter
+existed, the HIR spike did not proceed to browser execution. The currently
+shipped frontend path is browser-tested through `wasm-pack test --headless
+--firefox` and the packaged Worker is tested after `wasm-pack build` by
+`npm --prefix crates/rustscript-wasm test`. Shipping the HIR stack would add a
+large database/runtime beside the subset checks rather than replace them.
+Rustscript consequently implements only the permitted lexical-scope checker for
+`i64`, `bool`, and `()`. Repeat the HIR measurement, including browser
+execution if the API blocker is removed, on every rust-analyzer upgrade.
 
 ## Version-coupled WASM detail
 
 `ra_ap_syntax = 0.0.342` recognizes `no_salsa_async_drops`. The committed
 `.cargo/config.toml` sets it only for `wasm32-unknown-unknown`, selecting
 synchronous parse-result dropping. WASM tests repeatedly parse valid/invalid
-programs, obtain syntax/error results, and drop them. Revalidate the cfg in the
-dependency source and rerun the browser/Node tests whenever the exact
-rust-analyzer pins change.
+programs, obtain syntax/error results, and drop them. The browser Worker
+recovery test imports the production `host.js` through the `wasm-bindgen-test`
+browser server and exercises worker abort replacement without adding
+runtime-only JavaScript dependencies. Revalidate the cfg in the dependency
+source and rerun the browser/Node tests whenever the exact rust-analyzer pins
+change.

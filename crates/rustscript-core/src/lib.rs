@@ -67,11 +67,6 @@ pub fn debug_syntax(program: &ParsedProgram) -> String {
     format!("{:#?}", program.file().syntax())
 }
 
-/// Return a stable-for-this-build debug representation of checked executable IR.
-pub fn debug_ir(program: &CheckedProgram) -> String {
-    format!("{program:#?}")
-}
-
 /// Lazily resolve a diagnostic's source location without reparsing the program.
 pub fn locate(source: &str, diagnostic: &Diagnostic) -> Option<Location> {
     diagnostic.location(&line_index::LineIndex::new(source))

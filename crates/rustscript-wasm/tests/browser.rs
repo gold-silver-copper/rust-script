@@ -3,9 +3,16 @@
 
 use serde::Deserialize;
 use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::wasm_bindgen;
 use wasm_bindgen_test::{wasm_bindgen_test, wasm_bindgen_test_configure};
 
 wasm_bindgen_test_configure!(run_in_browser);
+
+#[wasm_bindgen(module = "/tests/browser_worker.js")]
+extern "C" {
+    #[wasm_bindgen(js_name = browserWorkerRecovery)]
+    fn browser_worker_recovery() -> JsValue;
+}
 
 #[derive(Deserialize)]
 struct Response {
@@ -64,6 +71,12 @@ fn browser_exports_run_and_report_structured_failures() {
         limited.error.expect("limit diagnostic").diagnostic.message,
         "output byte limit exceeded"
     );
+}
+
+#[wasm_bindgen_test]
+fn browser_host_reports_worker_abort_and_replaces_worker() {
+    let generations = browser_worker_recovery();
+    assert_eq!(generations.as_f64(), Some(2.0));
 }
 
 #[derive(serde::Serialize)]

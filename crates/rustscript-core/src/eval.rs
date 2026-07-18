@@ -4,11 +4,15 @@ use ra_ap_syntax::ast::{ArithOp, BinaryOp, CmpOp, LogicOp, Ordering, UnaryOp};
 use crate::checked_ir::{Block, Expression, ExpressionKind, FunctionId, Statement};
 use crate::{CheckedProgram, Diagnostic, Phase, Value};
 
+/// Deterministic interpreter resource limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct RuntimeLimits {
+    /// Maximum evaluator steps before execution stops.
     pub fuel: u64,
+    /// Maximum nested function calls.
     pub max_call_depth: usize,
+    /// Maximum stdout bytes retained by the interpreter.
     pub max_output_bytes: usize,
 }
 
@@ -22,10 +26,13 @@ impl Default for RuntimeLimits {
     }
 }
 
+/// Successful interpreter execution result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct RunResult {
+    /// Exact stdout bytes produced by `println!`.
     pub stdout: Vec<u8>,
+    /// Evaluator steps consumed.
     pub steps: u64,
 }
 
@@ -95,7 +102,7 @@ impl Evaluator<'_> {
         if arguments.len() != function.parameters.len() {
             return Err(runtime_error("invalid checked argument count", span));
         }
-        let mut locals = vec![None; function.local_count];
+        let mut locals = vec![None; function.parameters.len()];
         for (parameter, value) in function.parameters.iter().zip(arguments) {
             let slot = locals
                 .get_mut(parameter.id)
@@ -116,7 +123,7 @@ impl Evaluator<'_> {
     fn eval_block(
         &mut self,
         block: &Block,
-        locals: &mut [Option<Value>],
+        locals: &mut Vec<Option<Value>>,
     ) -> Result<Control, Diagnostic> {
         for statement in &block.statements {
             match self.eval_statement(statement, locals)? {
@@ -133,7 +140,7 @@ impl Evaluator<'_> {
     fn eval_statement(
         &mut self,
         statement: &Statement,
-        locals: &mut [Option<Value>],
+        locals: &mut Vec<Option<Value>>,
     ) -> Result<Control, Diagnostic> {
         self.step(statement_span(statement))?;
         match statement {
@@ -192,7 +199,7 @@ impl Evaluator<'_> {
     fn eval_expression(
         &mut self,
         expression: &Expression,
-        locals: &mut [Option<Value>],
+        locals: &mut Vec<Option<Value>>,
     ) -> Result<Control, Diagnostic> {
         self.step(expression.span)?;
         let value = match &expression.kind {
@@ -249,7 +256,7 @@ impl Evaluator<'_> {
         op: BinaryOp,
         lhs: &Expression,
         rhs: &Expression,
-        locals: &mut [Option<Value>],
+        locals: &mut Vec<Option<Value>>,
         span: TextRange,
     ) -> Result<Control, Diagnostic> {
         let left = value_or_control!(self.eval_expression(lhs, locals)?);
@@ -308,11 +315,14 @@ impl Evaluator<'_> {
 
     fn set_local(
         &self,
-        locals: &mut [Option<Value>],
+        locals: &mut Vec<Option<Value>>,
         id: usize,
         value: Value,
         span: TextRange,
     ) -> Result<(), Diagnostic> {
+        if id >= locals.len() {
+            locals.resize(id.saturating_add(1), None);
+        }
         let slot = locals
             .get_mut(id)
             .ok_or_else(|| runtime_error("invalid checked local id", Some(span)))?;
@@ -395,6 +405,7 @@ fn runtime_error(message: &str, span: Option<TextRange>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use crate::{Limits, RuntimeLimits, check_source, run};
+    use proptest::prelude::*;
 
     fn execute(source: &str) -> Result<crate::Execution, crate::Diagnostic> {
         run(
@@ -441,5 +452,33 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.message, "output byte limit exceeded");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(16))]
+
+        #[test]
+        fn runtime_error_categories_are_deterministic(case in 0usize..5) {
+            let source = [
+                "fn main() { 9223372036854775807_i64 + 1_i64; }",
+                "fn main() { 1_i64 / 0_i64; }",
+                "fn main() { 1_i64 % 0_i64; }",
+                "fn main() { while true {} }",
+                "fn main() { println!(\"{}\", true); }",
+            ][case];
+            let checked = check_source(source, Limits::default())?;
+            let limits = if case == 3 {
+                RuntimeLimits { fuel: 16, ..RuntimeLimits::default() }
+            } else if case == 4 {
+                RuntimeLimits { max_output_bytes: 1, ..RuntimeLimits::default() }
+            } else {
+                RuntimeLimits::default()
+            };
+            let first = run(&checked, limits).unwrap_err();
+            let second = run(&checked, limits).unwrap_err();
+            prop_assert_eq!(first.phase, second.phase);
+            prop_assert_eq!(first.message, second.message);
+            prop_assert_eq!(first.span, second.span);
+        }
     }
 }

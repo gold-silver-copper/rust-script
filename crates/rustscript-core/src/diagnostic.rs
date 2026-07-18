@@ -4,7 +4,9 @@ use line_index::LineIndex;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Span {
+    /// Start byte offset, inclusive.
     pub start: usize,
+    /// End byte offset, exclusive.
     pub end: usize,
 }
 
@@ -13,9 +15,13 @@ pub struct Span {
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "kebab-case"))]
 pub enum Phase {
+    /// Byte validation or lexical policy.
     Lex,
+    /// Rust parser or syntax admission.
     Parse,
+    /// Subset type checking and lowering.
     Type,
+    /// Deterministic interpreter execution.
     Runtime,
 }
 
@@ -23,7 +29,9 @@ pub enum Phase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Location {
+    /// One-based line number.
     pub line: u32,
+    /// One-based UTF-8 column number.
     pub column: u32,
 }
 
@@ -31,9 +39,13 @@ pub struct Location {
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub struct Diagnostic {
+    /// Pipeline phase that produced the diagnostic.
     pub phase: Phase,
+    /// Stable category-style explanation.
     pub message: String,
+    /// Source byte span when the failing construct is known.
     pub span: Option<Span>,
+    /// Optional display-only file name supplied by the embedding layer.
     pub file_name: Option<String>,
 }
 
@@ -54,8 +66,7 @@ impl Diagnostic {
         self
     }
 
-    /// Resolve this diagnostic's start offset through the shared line index.
-    pub fn location(&self, index: &LineIndex) -> Option<Location> {
+    pub(crate) fn location(&self, index: &LineIndex) -> Option<Location> {
         let offset = u32::try_from(self.span?.start).ok()?.into();
         let line_col = index.try_line_col(offset)?;
         Some(Location {

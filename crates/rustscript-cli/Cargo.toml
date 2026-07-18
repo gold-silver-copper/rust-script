@@ -12,6 +12,3 @@ path = "src/main.rs"
 [dependencies]
 rustscript-core.workspace = true
 annotate-snippets.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true

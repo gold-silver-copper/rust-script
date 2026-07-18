@@ -21,7 +21,9 @@ testing; it is not a Rust compiler, macro engine, or sandbox for arbitrary Rust.
 - `fuzz`: independent `cargo-fuzz` package with byte and typed-IR targets.
 
 See [the tooling reuse audit](docs/tooling-reuse.md) for the rust-analyzer API
-map and the measured reason the HIR/type-inference stack is not embedded.
+map and the measured reason the HIR/type-inference stack is not embedded. See
+[the regression corpus](docs/regression-corpus.md) for minimized bug-category
+coverage and dependency fuzz findings.
 
 ## Exact language profile
 
@@ -85,9 +87,9 @@ bytes -> UTF-8/ASCII/size checks
 ```
 
 Rustscript does not contain a lexer, parser cursor, syntax AST, precedence
-table, or handwritten line index. `ParsedProgram` owns the validated source,
-rust-analyzer tree, and `LineIndex`; `CheckedProgram` is opaque resolved
-executable IR with span-insensitive structural comparison for testing.
+table, or handwritten line index. `ParsedProgram` keeps the rust-analyzer tree
+and `LineIndex` opaque; `CheckedProgram` is opaque resolved executable IR with
+span-insensitive structural comparison for testing.
 
 Default frontend limits are 1 MiB source, 100,000 lexer tokens, delimiter depth
 256, 200,000 syntax elements, syntax/IR depth 256, 1,024 functions, and 256
@@ -136,7 +138,9 @@ worker boundary described above.
 cargo check -p rustscript-wasm --target wasm32-unknown-unknown
 wasm-pack test --node crates/rustscript-wasm
 wasm-pack test --headless --firefox crates/rustscript-wasm --test browser
-node --test crates/rustscript-wasm/host.test.mjs
+npm --prefix crates/rustscript-wasm run build
+npm --prefix crates/rustscript-wasm test
+npm --prefix crates/rustscript-wasm run pack:check
 ```
 
 ## Differential testing

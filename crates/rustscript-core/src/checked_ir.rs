@@ -5,8 +5,11 @@ use ra_ap_syntax::{SmolStr, TextRange};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Type {
+    /// Signed 64-bit integer.
     I64,
+    /// Boolean value.
     Bool,
+    /// Rust unit value `()`.
     Unit,
 }
 
@@ -14,8 +17,11 @@ pub enum Type {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 pub enum Value {
+    /// Signed 64-bit integer value.
     I64(i64),
+    /// Boolean value.
     Bool(bool),
+    /// Unit value.
     Unit,
 }
 

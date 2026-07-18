@@ -1,13 +1,45 @@
 #![forbid(unsafe_code)]
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_rustscript")
 }
 
-fn source_file(source: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let directory = tempfile::tempdir().expect("temporary directory");
+struct TestDir {
+    path: PathBuf,
+}
+
+impl TestDir {
+    fn new() -> Self {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+        let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("rustscript-cli-test-{}-{id}", std::process::id()));
+        std::fs::create_dir(&path).expect("temporary directory");
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn source_file(source: &str) -> (TestDir, std::path::PathBuf) {
+    source_file_bytes(source.as_bytes())
+}
+
+fn source_file_bytes(source: &[u8]) -> (TestDir, std::path::PathBuf) {
+    let directory = TestDir::new();
     let path = directory.path().join("program.rs");
     std::fs::write(&path, source).expect("source file");
     (directory, path)
@@ -78,6 +110,25 @@ fn source_errors_exit_one_and_usage_errors_exit_two() {
     assert_eq!(invalid.status.code(), Some(1));
     assert!(invalid.stdout.is_empty());
     assert!(!invalid.stderr.is_empty());
+
+    let (_directory, invalid_utf8) = source_file_bytes(b"fn main() {\xff }");
+    let invalid_utf8 = Command::new(binary())
+        .args(["check", invalid_utf8.to_str().expect("UTF-8 path")])
+        .output()
+        .expect("invalid UTF-8 command");
+    assert_eq!(invalid_utf8.status.code(), Some(1));
+    assert!(invalid_utf8.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&invalid_utf8.stderr).contains("not valid UTF-8"));
+
+    let oversized = vec![b' '; rustscript_core::Limits::default().max_source_bytes + 2];
+    let (_directory, oversized) = source_file_bytes(&oversized);
+    let oversized = Command::new(binary())
+        .args(["check", oversized.to_str().expect("UTF-8 path")])
+        .output()
+        .expect("oversized source command");
+    assert_eq!(oversized.status.code(), Some(1));
+    assert!(oversized.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&oversized.stderr).contains("source byte limit exceeded"));
 
     let usage = Command::new(binary()).output().expect("usage command");
     assert_eq!(usage.status.code(), Some(2));

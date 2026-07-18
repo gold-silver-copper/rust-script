@@ -2,9 +2,10 @@
 
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::{io::Read, path::Path};
 
 use rustscript_difftest::{
-    RustcOracle, minimize_failure, replay_source, run_case, write_failure_artifact,
+    RustcOracle, minimize_failure, replay_source, run_case, write_failure_artifact_with_oracle,
     write_success_artifact,
 };
 
@@ -31,7 +32,8 @@ fn run(arguments: Arguments) -> Result<(), String> {
     let oracle = RustcOracle::discover(arguments.rustc);
     let artifact_root = PathBuf::from("artifacts/differential");
     if let Some(path) = arguments.replay {
-        let bytes = std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let bytes = read_bounded(&path, rustscript_core::Limits::default().max_source_bytes)
+            .map_err(|error| format!("{}: {error}", path.display()))?;
         let source = String::from_utf8(bytes)
             .map_err(|_| format!("{} is not valid UTF-8", path.display()))?;
         match replay_source(&source, &oracle) {
@@ -45,7 +47,7 @@ fn run(arguments: Arguments) -> Result<(), String> {
             }
             Err(mut failure) => {
                 minimize_failure(&mut failure, &oracle);
-                report_failure(&failure, &artifact_root)
+                report_failure(&failure, &artifact_root, &oracle)
             }
         }
     } else {
@@ -65,7 +67,7 @@ fn run(arguments: Arguments) -> Result<(), String> {
                 }
                 Err(mut failure) => {
                     minimize_failure(&mut failure, &oracle);
-                    return report_failure(&failure, &artifact_root);
+                    return report_failure(&failure, &artifact_root, &oracle);
                 }
             }
         }
@@ -77,11 +79,22 @@ fn run(arguments: Arguments) -> Result<(), String> {
     }
 }
 
+fn read_bounded(path: &Path, maximum_bytes: usize) -> std::io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let limit = u64::try_from(maximum_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut source = Vec::with_capacity(maximum_bytes.saturating_add(1).min(64 * 1024));
+    file.take(limit).read_to_end(&mut source)?;
+    Ok(source)
+}
+
 fn report_failure(
     failure: &rustscript_difftest::DiffFailure,
     root: &std::path::Path,
+    oracle: &RustcOracle,
 ) -> Result<(), String> {
-    let directory = write_failure_artifact(failure, root)
+    let directory = write_failure_artifact_with_oracle(failure, root, Some(oracle))
         .map_err(|error| format!("failed to write artifact: {error}"))?;
     Err(format!(
         "seed {} case {} failed ({:?}): {}; artifact: {}",

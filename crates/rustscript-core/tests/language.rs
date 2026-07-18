@@ -69,8 +69,11 @@ fn rejects_profile_edge_cases() {
         "fn helper(x: i64,) {} fn main() {}",
         "fn helper(x: i64) {} fn main() { helper(1_i64,); }",
         "fn main() { while false {}; }",
+        "fn main() { while false { 1_i64 } }",
         "fn main() { if true { () } else { () } let x = 1_i64; }",
         "fn main() { println!(\"{}\", 1_i64,); }",
+        "fn main() { println!(\"{}\", 1_i64;); }",
+        "fn main() { println!(\"{}\", 1_i64; println!(\"{}\", 2_i64)); }",
         "fn main() { let value = println!(\"{}\", 1_i64); }",
         "fn main() { println!(\"{}\", ()); }",
         "fn exits() -> i64 { return 1_i64; true } fn main() {}",
@@ -82,6 +85,11 @@ fn rejects_profile_edge_cases() {
         "fn main() { let r#value = 1_i64; }",
         "fn main() { /// docs\n }",
         "fn main() { /* block */ }",
+        "fn g(x: ()) -> i64 { 0_i64 } fn f() -> bool { g({ return true; }) } fn main() {}",
+        "fn g(x: ()) -> bool { true } fn f() -> i64 { false && g({ return 1_i64; }) } fn main() { println!(\"{}\", f()); }",
+        "fn g(x: ()) -> i64 { 0_i64 } fn main() { while false { g({ return; }) } }",
+        "fn f() -> i64 { return 1_i64; while false {} } fn main() {}",
+        "fn g(x: ()) -> bool { true } fn f() -> i64 { while g({ return 1_i64; }) {} let x = (); } fn main() {}",
     ];
     for source in invalid {
         assert!(check_source(source, Limits::default()).is_err(), "{source}");
@@ -162,4 +170,54 @@ fn arithmetic_traps_and_runtime_limits_are_structured() {
     )
     .expect_err("call-depth limit");
     assert_eq!(error.message, "call depth limit exceeded");
+}
+
+#[test]
+fn unreachable_locals_do_not_preallocate_every_recursive_frame() {
+    let unreachable = (0..5_000)
+        .map(|index| format!("let x{index} = 0_i64;"))
+        .collect::<String>();
+    let source = format!("fn recurse() {{ recurse(); {unreachable} }} fn main() {{ recurse(); }}");
+    let program = check_source(&source, Limits::default()).expect("recursive source must check");
+    let error = run(
+        &program,
+        RuntimeLimits {
+            fuel: 10_000,
+            max_call_depth: 64,
+            max_output_bytes: 0,
+        },
+    )
+    .expect_err("call depth must stop recursion");
+    assert_eq!(error.message, "call depth limit exceeded");
+}
+
+#[test]
+fn println_nested_runtime_spans_map_to_original_source() {
+    let source = "fn main() { println!(\"{}\", 1_i64 + (2_i64 / 0_i64)); }";
+    let program = check_source(source, Limits::default()).expect("source must check");
+    let error = run(&program, RuntimeLimits::default()).expect_err("division must trap");
+    let expected = "2_i64 / 0_i64";
+    let start = source.find(expected).expect("nested expression");
+    assert_eq!(
+        error.span,
+        Some(rustscript_core::Span {
+            start,
+            end: start + expected.len(),
+        })
+    );
+}
+
+#[test]
+fn println_nested_admission_spans_map_to_original_source() {
+    let source = "fn main() { println!(\"{}\", || true); }";
+    let error = frontend_error(parse(source, Limits::default()), "closure must be rejected");
+    let expected = "|| true";
+    let start = source.find(expected).expect("closure expression");
+    assert_eq!(
+        error.span,
+        Some(rustscript_core::Span {
+            start,
+            end: start + expected.len(),
+        })
+    );
 }

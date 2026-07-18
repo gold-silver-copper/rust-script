@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
+#![doc = "Command-line interface for rustscript."]
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -53,9 +54,10 @@ fn run_cli(arguments: Vec<std::ffi::OsString>) -> Result<(), CliError> {
         return Err(CliError::Usage("unknown operation"));
     }
     let path = Path::new(&arguments[1]);
-    let source = std::fs::read(path).map_err(CliError::Io)?;
+    let parse_limits = Limits::default();
+    let source = read_bounded(path, parse_limits.max_source_bytes).map_err(CliError::Io)?;
     let display_path = path.display().to_string();
-    let parsed = rustscript_core::parse_bytes(&source, Limits::default()).map_err(|error| {
+    let parsed = rustscript_core::parse_bytes(&source, parse_limits).map_err(|error| {
         CliError::Diagnostic(Box::new(DiagnosticReport {
             error: error.with_file_name(display_path.clone()),
             source: source.clone(),
@@ -108,13 +110,33 @@ fn run_cli(arguments: Vec<std::ffi::OsString>) -> Result<(), CliError> {
     stdout.flush().map_err(CliError::Io)
 }
 
+fn read_bounded(path: &Path, maximum_bytes: usize) -> io::Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let limit = u64::try_from(maximum_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut source = Vec::with_capacity(maximum_bytes.saturating_add(1).min(64 * 1024));
+    file.take(limit).read_to_end(&mut source)?;
+    Ok(source)
+}
+
 fn render_diagnostic(error: &Diagnostic, source: &[u8], path: &str) {
-    let source = String::from_utf8_lossy(source);
+    let Ok(source) = std::str::from_utf8(source) else {
+        if let Some(span) = error.span {
+            eprintln!(
+                "{:?}: {} at {path}: bytes {}..{}",
+                error.phase, error.message, span.start, span.end
+            );
+        } else {
+            eprintln!("{:?}: {} at {path}", error.phase, error.message);
+        }
+        return;
+    };
     let end = source.len();
     let span = error
         .span
         .map(|span| span.start.min(end)..span.end.min(end).max(span.start.min(end)));
-    let mut snippet = Snippet::source(source.as_ref()).path(path);
+    let mut snippet = Snippet::source(source).path(path);
     if let Some(span) = span {
         snippet = snippet.annotation(AnnotationKind::Primary.span(span).label(&error.message));
     }

@@ -68,7 +68,13 @@ fn validate_descendants(root: &ra_ap_syntax::SyntaxNode, limits: Limits) -> Resu
                         error
                     },
                 )?;
-                validate_descendants(input.expression.syntax(), limits)?;
+                validate_descendants(input.expression.syntax(), limits).map_err(|mut error| {
+                    error.span = error
+                        .span
+                        .and_then(|span| input.range_map.span(span))
+                        .or_else(|| Some(crate::diagnostic::span(input.source_range)));
+                    error
+                })?;
             }
         }
         if let Some(stmt) = ast::Stmt::cast(node.clone()) {

@@ -28,6 +28,12 @@ class FakeWorker {
   }
 }
 
+class ThrowingWorker extends FakeWorker {
+  postMessage() {
+    throw new Error("cannot clone request");
+  }
+}
+
 test("reports frontend abort and replaces the failed worker", async () => {
   const workers = [];
   const host = new RustscriptWorkerHost("worker.js", () => {
@@ -49,6 +55,47 @@ test("reports frontend abort and replaces the failed worker", async () => {
   workers[1].succeed({ ok: true });
   assert.deepEqual(await successfulRequest, { ok: true });
   host.close();
+});
+
+test("does not leak pending calls when postMessage throws synchronously", async () => {
+  const host = new RustscriptWorkerHost("worker.js", () => new ThrowingWorker());
+  const result = await host.request("check", () => {});
+  assert.deepEqual(result, {
+    ok: false,
+    error: { phase: "parse", message: "frontend-postmessage-failed" },
+  });
+  assert.equal(host.pending.size, 0);
+  host.close();
+});
+
+test("bounds consecutive deterministic worker replacement failures", async () => {
+  const workers = [];
+  const host = new RustscriptWorkerHost(
+    "worker.js",
+    () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    },
+    { maxConsecutiveFailures: 1 },
+  );
+
+  const first = host.request("check", "fn main() {}");
+  workers[0].abort();
+  assert.deepEqual(await first, {
+    ok: false,
+    error: { phase: "parse", message: "frontend-aborted" },
+  });
+  assert.equal(workers.length, 2);
+
+  const second = host.request("check", "fn main() {}");
+  workers[1].abort();
+  assert.deepEqual(await second, {
+    ok: false,
+    error: { phase: "parse", message: "frontend-aborted" },
+  });
+  assert.equal(host.closed, true);
+  assert.equal(workers.length, 2);
 });
 
 class NodeWorkerAdapter {

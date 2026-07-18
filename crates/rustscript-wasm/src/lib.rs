@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![doc = "WASM adapter for the rustscript semantic engine."]
 
 use rustscript_core::{Diagnostic, Limits, Location, RuntimeLimits};
 use serde::{Deserialize, Serialize};
@@ -44,8 +45,7 @@ impl Response {
         }
     }
 
-    fn failure(source: &str, diagnostic: Diagnostic) -> Self {
-        let location = rustscript_core::locate(source, &diagnostic);
+    fn failure(location: Option<Location>, diagnostic: Diagnostic) -> Self {
         Self {
             ok: false,
             output: None,
@@ -60,21 +60,25 @@ impl Response {
 }
 
 #[wasm_bindgen]
+/// Check source and return a structured JavaScript response.
 pub fn check(source: &str, options: JsValue) -> Result<JsValue, JsValue> {
     respond(source, options, Operation::Check)
 }
 
 #[wasm_bindgen]
+/// Run source and return stdout bytes, steps, or a structured diagnostic.
 pub fn run(source: &str, options: JsValue) -> Result<JsValue, JsValue> {
     respond(source, options, Operation::Run)
 }
 
 #[wasm_bindgen]
+/// Return the pinned rust-analyzer syntax debug tree for admitted source.
 pub fn ast(source: &str, options: JsValue) -> Result<JsValue, JsValue> {
     respond(source, options, Operation::Ast)
 }
 
 #[wasm_bindgen]
+/// Return canonical rustscript formatting for admitted source.
 pub fn format(source: &str, options: JsValue) -> Result<JsValue, JsValue> {
     respond(source, options, Operation::Format)
 }
@@ -87,13 +91,23 @@ enum Operation {
 }
 
 fn respond(source: &str, options: JsValue, operation: Operation) -> Result<JsValue, JsValue> {
-    let options = if options.is_null() || options.is_undefined() {
-        Options::default()
-    } else {
-        serde_wasm_bindgen::from_value(options).map_err(js_error)?
+    let options = match decode_options(options) {
+        Ok(options) => options,
+        Err(error) => {
+            let response = Response::failure(
+                None,
+                Diagnostic {
+                    phase: rustscript_core::Phase::Parse,
+                    message: format!("invalid options: {error}"),
+                    span: None,
+                    file_name: None,
+                },
+            );
+            return serialize_response(&response);
+        }
     };
     let response = match rustscript_core::parse(source, options.frontend) {
-        Err(error) => Response::failure(source, error),
+        Err(error) => Response::failure(rustscript_core::locate(source, &error), error),
         Ok(parsed) => match operation {
             Operation::Ast => {
                 Response::success(Some(rustscript_core::debug_syntax(&parsed)), None, None)
@@ -105,7 +119,7 @@ fn respond(source: &str, options: JsValue, operation: Operation) -> Result<JsVal
                 Err(errors) => errors.into_iter().next().map_or_else(
                     || {
                         Response::failure(
-                            source,
+                            None,
                             Diagnostic {
                                 phase: rustscript_core::Phase::Type,
                                 message: "checker returned no diagnostic".into(),
@@ -114,7 +128,7 @@ fn respond(source: &str, options: JsValue, operation: Operation) -> Result<JsVal
                             },
                         )
                     },
-                    |error| Response::failure(source, error),
+                    |error| Response::failure(parsed.location(&error), error),
                 ),
                 Ok(program) => match operation {
                     Operation::Check => Response::success(None, None, None),
@@ -122,7 +136,7 @@ fn respond(source: &str, options: JsValue, operation: Operation) -> Result<JsVal
                         Ok(execution) => {
                             Response::success(None, Some(execution.stdout), Some(execution.steps))
                         }
-                        Err(error) => Response::failure(source, error),
+                        Err(error) => Response::failure(parsed.location(&error), error),
                     },
                     Operation::Ast => {
                         Response::success(Some(rustscript_core::debug_syntax(&parsed)), None, None)
@@ -136,7 +150,21 @@ fn respond(source: &str, options: JsValue, operation: Operation) -> Result<JsVal
             },
         },
     };
-    serde_wasm_bindgen::to_value(&response).map_err(js_error)
+    serialize_response(&response)
+}
+
+fn decode_options(options: JsValue) -> Result<Options, serde_wasm_bindgen::Error> {
+    if options.is_null() || options.is_undefined() {
+        Ok(Options::default())
+    } else {
+        serde_wasm_bindgen::from_value(options)
+    }
+}
+
+fn serialize_response(response: &Response) -> Result<JsValue, JsValue> {
+    response
+        .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+        .map_err(js_error)
 }
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
@@ -216,6 +244,17 @@ mod tests {
         assert_eq!(
             output.error.expect("output error").diagnostic.message,
             "output byte limit exceeded"
+        );
+
+        let invalid_options = response(check("fn main() {}", JsValue::from_str("bad")).unwrap());
+        assert!(!invalid_options.ok);
+        assert!(
+            invalid_options
+                .error
+                .expect("options error")
+                .diagnostic
+                .message
+                .starts_with("invalid options:")
         );
     }
 }

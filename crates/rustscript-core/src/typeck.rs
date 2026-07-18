@@ -49,7 +49,7 @@ pub(crate) fn check(parsed: &ParsedProgram) -> Result<CheckedProgram, Diagnostic
         let mut checker =
             BodyChecker::new(signature, &signatures, &function_names, parsed.limits());
         let checked = checker.check_block(&body)?;
-        if checked.ty != signature.return_type && !checked.diverges {
+        if checked.ty != signature.return_type && !checked.is_never {
             return Err(type_error(
                 "function body does not produce its declared return type",
                 body.syntax(),
@@ -80,11 +80,13 @@ struct Binding {
 struct CheckedBlock {
     block: Block,
     ty: Type,
-    diverges: bool,
+    is_never: bool,
+    exits: bool,
 }
 struct CheckedExpr {
     expression: Expression,
-    diverges: bool,
+    is_never: bool,
+    exits: bool,
 }
 
 struct BodyChecker<'a> {
@@ -140,21 +142,27 @@ impl<'a> BodyChecker<'a> {
         }
         let span = block.syntax().text_range();
         let tail_expression = block.tail_expr();
-        let (tail, ty, diverges) = match tail_expression {
+        let (tail, ty, is_never, exits) = match tail_expression {
             Some(ast::Expr::WhileExpr(while_expression)) => {
-                let (statement, _) = self.check_while(while_expression)?;
+                let (statement, while_exits) = self.check_while(while_expression)?;
                 statements.push(statement);
                 let tail = Box::new(Expression {
                     kind: ExpressionKind::Value(Value::Unit),
                     ty: Type::Unit,
                     span,
                 });
-                (Some(tail), Type::Unit, false)
+                let exits = block_exits_early || while_exits;
+                (Some(tail), Type::Unit, false, exits)
             }
             Some(expression) => {
                 let checked = self.check_expression(expression)?;
                 let ty = checked.expression.ty;
-                (Some(Box::new(checked.expression)), ty, checked.diverges)
+                (
+                    Some(Box::new(checked.expression)),
+                    ty,
+                    checked.is_never,
+                    block_exits_early || checked.exits,
+                )
             }
             None => {
                 let tail = Box::new(Expression {
@@ -162,7 +170,7 @@ impl<'a> BodyChecker<'a> {
                     ty: Type::Unit,
                     span,
                 });
-                (Some(tail), Type::Unit, block_exits_early)
+                (Some(tail), Type::Unit, block_exits_early, block_exits_early)
             }
         };
         self.scopes.pop();
@@ -173,7 +181,8 @@ impl<'a> BodyChecker<'a> {
                 span,
             },
             ty,
-            diverges,
+            is_never,
+            exits,
         })
     }
 
@@ -260,7 +269,7 @@ impl<'a> BodyChecker<'a> {
                             ));
                         }
                         let checked = self.check_expression(expression)?;
-                        Ok((Statement::Expression(checked.expression), checked.diverges))
+                        Ok((Statement::Expression(checked.expression), checked.exits))
                     }
                 }
             }
@@ -333,7 +342,7 @@ impl<'a> BodyChecker<'a> {
                 annotation,
                 initializer: checked.expression,
             },
-            checked.diverges,
+            checked.exits,
         ))
     }
 
@@ -371,7 +380,7 @@ impl<'a> BodyChecker<'a> {
                 value: checked.expression,
                 span: binary.syntax().text_range(),
             },
-            checked.diverges,
+            checked.exits,
         ))
     }
 
@@ -394,13 +403,19 @@ impl<'a> BodyChecker<'a> {
             .and_then(|body| self.check_block(&body));
         self.loop_depth -= 1;
         let body = body_result?;
+        if body.ty != Type::Unit && !body.is_never {
+            return Err(type_error(
+                "while body must complete as unit",
+                expression.syntax(),
+            ));
+        }
         Ok((
             Statement::While {
                 condition: condition.expression,
                 body: body.block,
                 span: expression.syntax().text_range(),
             },
-            condition.diverges,
+            false,
         ))
     }
 
@@ -432,36 +447,44 @@ impl<'a> BodyChecker<'a> {
                 }
                 error
             })?;
+        let source_range = input.source_range;
+        let range_map = input.range_map;
         let mut checked = self
             .check_expression(input.expression)
             .map_err(|mut error| {
-                error.span = Some(crate::diagnostic::span(input.source_range));
+                error.span = error
+                    .span
+                    .and_then(|span| range_map.span(span))
+                    .or_else(|| Some(crate::diagnostic::span(source_range)));
                 error
             })?;
         if !matches!(checked.expression.ty, Type::I64 | Type::Bool) {
             return Err(Diagnostic::new(
                 Phase::Type,
                 "println value must be i64 or bool",
-                Some(crate::diagnostic::span(input.source_range)),
+                Some(crate::diagnostic::span(source_range)),
             ));
         }
-        replace_expression_ranges(&mut checked.expression, input.source_range);
+        map_expression_ranges(&mut checked.expression, range_map, source_range);
         Ok((
             Statement::Print {
                 value: checked.expression,
                 span: macro_range,
             },
-            checked.diverges,
+            checked.exits,
         ))
     }
 
     fn check_expression(&mut self, expression: ast::Expr) -> Result<CheckedExpr, Diagnostic> {
         let span = expression.syntax().text_range();
-        let (kind, ty, diverges) = match expression {
+        let (kind, ty, is_never, exits) = match expression {
             ast::Expr::Literal(literal) => match literal.kind() {
-                LiteralKind::Bool(value) => {
-                    (ExpressionKind::Value(Value::Bool(value)), Type::Bool, false)
-                }
+                LiteralKind::Bool(value) => (
+                    ExpressionKind::Value(Value::Bool(value)),
+                    Type::Bool,
+                    false,
+                    false,
+                ),
                 LiteralKind::IntNumber(number) => {
                     let text = number.syntax().text().to_string();
                     let digits = text
@@ -470,12 +493,17 @@ impl<'a> BodyChecker<'a> {
                     let value = digits
                         .parse::<i64>()
                         .map_err(|_| type_error("i64 literal is out of range", literal.syntax()))?;
-                    (ExpressionKind::Value(Value::I64(value)), Type::I64, false)
+                    (
+                        ExpressionKind::Value(Value::I64(value)),
+                        Type::I64,
+                        false,
+                        false,
+                    )
                 }
                 _ => return Err(type_error("unsupported literal", literal.syntax())),
             },
             ast::Expr::TupleExpr(tuple) if tuple.fields().next().is_none() => {
-                (ExpressionKind::Value(Value::Unit), Type::Unit, false)
+                (ExpressionKind::Value(Value::Unit), Type::Unit, false, false)
             }
             ast::Expr::ParenExpr(paren) => {
                 return self.check_expression(paren.expr().ok_or_else(|| {
@@ -489,7 +517,7 @@ impl<'a> BodyChecker<'a> {
                 let binding = self
                     .lookup(&name)
                     .ok_or_else(|| type_error("unknown local name", path.syntax()))?;
-                (ExpressionKind::Local(binding.id), binding.ty, false)
+                (ExpressionKind::Local(binding.id), binding.ty, false, false)
             }
             ast::Expr::PrefixExpr(prefix) => {
                 let op = prefix
@@ -510,7 +538,8 @@ impl<'a> BodyChecker<'a> {
                         operand: Box::new(operand.expression),
                     },
                     ty,
-                    operand.diverges,
+                    false,
+                    operand.exits,
                 )
             }
             ast::Expr::BinExpr(binary) => return self.check_binary(binary),
@@ -520,7 +549,8 @@ impl<'a> BodyChecker<'a> {
                 (
                     ExpressionKind::Block(checked.block),
                     checked.ty,
-                    checked.diverges,
+                    checked.is_never,
+                    checked.exits,
                 )
             }
             ast::Expr::IfExpr(if_expression) => return self.check_if(if_expression),
@@ -533,7 +563,8 @@ impl<'a> BodyChecker<'a> {
         };
         Ok(CheckedExpr {
             expression: Expression { kind, ty, span },
-            diverges,
+            is_never,
+            exits,
         })
     }
 
@@ -584,7 +615,11 @@ impl<'a> BodyChecker<'a> {
             }
             _ => return Err(type_error("invalid binary operand types", binary.syntax())),
         };
-        let diverges = lhs.diverges || rhs.diverges;
+        let exits = if matches!(op, BinaryOp::LogicOp(_)) {
+            lhs.exits
+        } else {
+            lhs.exits || rhs.exits
+        };
         Ok(CheckedExpr {
             expression: Expression {
                 kind: ExpressionKind::Binary {
@@ -595,7 +630,8 @@ impl<'a> BodyChecker<'a> {
                 ty,
                 span: binary.syntax().text_range(),
             },
-            diverges,
+            is_never: false,
+            exits,
         })
     }
 
@@ -627,13 +663,13 @@ impl<'a> BodyChecker<'a> {
             return Err(type_error("wrong function argument count", call.syntax()));
         }
         let mut checked_arguments = Vec::with_capacity(arguments.len());
-        let mut diverges = false;
+        let mut exits = false;
         for (argument, parameter) in arguments.into_iter().zip(&signature.parameters) {
             let checked = self.check_expression(argument)?;
             if checked.expression.ty != parameter.ty {
                 return Err(type_error("function argument type mismatch", call.syntax()));
             }
-            diverges |= checked.diverges;
+            exits |= checked.exits;
             checked_arguments.push(checked.expression);
         }
         Ok(CheckedExpr {
@@ -645,7 +681,8 @@ impl<'a> BodyChecker<'a> {
                 ty: signature.return_type,
                 span: call.syntax().text_range(),
             },
-            diverges,
+            is_never: false,
+            exits,
         })
     }
 
@@ -672,14 +709,15 @@ impl<'a> BodyChecker<'a> {
                 ));
             }
         };
-        let ty = if then_branch.diverges {
+        let ty = if then_branch.is_never {
             else_branch.ty
-        } else if else_branch.diverges || then_branch.ty == else_branch.ty {
+        } else if else_branch.is_never || then_branch.ty == else_branch.ty {
             then_branch.ty
         } else {
             return Err(type_error("if branch type mismatch", expression.syntax()));
         };
-        let diverges = condition.diverges || (then_branch.diverges && else_branch.diverges);
+        let is_never = then_branch.is_never && else_branch.is_never;
+        let exits = condition.exits || (then_branch.exits && else_branch.exits);
         Ok(CheckedExpr {
             expression: Expression {
                 kind: ExpressionKind::If {
@@ -690,7 +728,8 @@ impl<'a> BodyChecker<'a> {
                 ty,
                 span: expression.syntax().text_range(),
             },
-            diverges,
+            is_never,
+            exits,
         })
     }
 
@@ -702,61 +741,77 @@ impl<'a> BodyChecker<'a> {
     }
 }
 
-fn replace_expression_ranges(expression: &mut Expression, range: ra_ap_syntax::TextRange) {
-    expression.span = range;
+fn map_expression_ranges(
+    expression: &mut Expression,
+    range_map: crate::frontend::intrinsic::ExpressionRangeMap,
+    fallback: ra_ap_syntax::TextRange,
+) {
+    expression.span = range_map.text_range(expression.span).unwrap_or(fallback);
     match &mut expression.kind {
         ExpressionKind::Value(_) | ExpressionKind::Local(_) => {}
         ExpressionKind::Call { arguments, .. } => {
             for argument in arguments {
-                replace_expression_ranges(argument, range);
+                map_expression_ranges(argument, range_map, fallback);
             }
         }
-        ExpressionKind::Unary { operand, .. } => replace_expression_ranges(operand, range),
-        ExpressionKind::Binary { lhs, rhs, .. } => {
-            replace_expression_ranges(lhs, range);
-            replace_expression_ranges(rhs, range);
+        ExpressionKind::Unary { operand, .. } => {
+            map_expression_ranges(operand, range_map, fallback);
         }
-        ExpressionKind::Block(block) => replace_block_ranges(block, range),
+        ExpressionKind::Binary { lhs, rhs, .. } => {
+            map_expression_ranges(lhs, range_map, fallback);
+            map_expression_ranges(rhs, range_map, fallback);
+        }
+        ExpressionKind::Block(block) => map_block_ranges(block, range_map, fallback),
         ExpressionKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
-            replace_expression_ranges(condition, range);
-            replace_block_ranges(then_branch, range);
-            replace_block_ranges(else_branch, range);
+            map_expression_ranges(condition, range_map, fallback);
+            map_block_ranges(then_branch, range_map, fallback);
+            map_block_ranges(else_branch, range_map, fallback);
         }
     }
 }
 
-fn replace_block_ranges(block: &mut Block, range: ra_ap_syntax::TextRange) {
-    block.span = range;
+fn map_block_ranges(
+    block: &mut Block,
+    range_map: crate::frontend::intrinsic::ExpressionRangeMap,
+    fallback: ra_ap_syntax::TextRange,
+) {
+    block.span = range_map.text_range(block.span).unwrap_or(fallback);
     for statement in &mut block.statements {
         match statement {
-            Statement::Let { initializer, .. } => replace_expression_ranges(initializer, range),
+            Statement::Let { initializer, .. } => {
+                map_expression_ranges(initializer, range_map, fallback);
+            }
             Statement::Assign { value, span, .. } => {
-                *span = range;
-                replace_expression_ranges(value, range);
+                *span = range_map.text_range(*span).unwrap_or(fallback);
+                map_expression_ranges(value, range_map, fallback);
             }
             Statement::While {
                 condition,
                 body,
                 span,
             } => {
-                *span = range;
-                replace_expression_ranges(condition, range);
-                replace_block_ranges(body, range);
+                *span = range_map.text_range(*span).unwrap_or(fallback);
+                map_expression_ranges(condition, range_map, fallback);
+                map_block_ranges(body, range_map, fallback);
             }
             Statement::Return { value, span } | Statement::Print { value, span } => {
-                *span = range;
-                replace_expression_ranges(value, range);
+                *span = range_map.text_range(*span).unwrap_or(fallback);
+                map_expression_ranges(value, range_map, fallback);
             }
-            Statement::Break(span) | Statement::Continue(span) => *span = range,
-            Statement::Expression(expression) => replace_expression_ranges(expression, range),
+            Statement::Break(span) | Statement::Continue(span) => {
+                *span = range_map.text_range(*span).unwrap_or(fallback);
+            }
+            Statement::Expression(expression) => {
+                map_expression_ranges(expression, range_map, fallback);
+            }
         }
     }
     if let Some(tail) = &mut block.tail {
-        replace_expression_ranges(tail, range);
+        map_expression_ranges(tail, range_map, fallback);
     }
 }
 

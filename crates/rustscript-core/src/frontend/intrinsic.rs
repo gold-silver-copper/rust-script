@@ -7,16 +7,49 @@
 //! lexer, expression parser, or precedence implementation is introduced.
 
 use ra_ap_syntax::ast::HasModuleItem;
-use ra_ap_syntax::{AstNode, Edition, NodeOrToken, SourceFile, SyntaxKind, TextRange, ast};
+use ra_ap_syntax::{
+    AstNode, Edition, NodeOrToken, SourceFile, SyntaxKind, TextRange, TextSize, ast,
+};
 
 use crate::{Diagnostic, Limits, Phase};
 
-const WRAPPER_PREFIX: &str = "fn __rustscript_intrinsic(){let __rustscript_value=";
-const WRAPPER_SUFFIX: &str = ";}";
+const WRAPPER_PREFIX: &str = "fn __rustscript_intrinsic(){let __rustscript_value=(";
+const WRAPPER_SUFFIX: &str = ");}";
 
 pub(crate) struct PrintExpression {
     pub(crate) expression: ast::Expr,
     pub(crate) source_range: TextRange,
+    pub(crate) range_map: ExpressionRangeMap,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ExpressionRangeMap {
+    wrapper_start: TextSize,
+    source_start: TextSize,
+    source_range: TextRange,
+}
+
+impl ExpressionRangeMap {
+    pub(crate) fn text_range(self, range: TextRange) -> Option<TextRange> {
+        let wrapper_start = u32::from(self.wrapper_start);
+        let source_start = u32::from(self.source_start);
+        let start = u32::from(range.start())
+            .checked_sub(wrapper_start)?
+            .checked_add(source_start)?;
+        let end = u32::from(range.end())
+            .checked_sub(wrapper_start)?
+            .checked_add(source_start)?;
+        let mapped = TextRange::new(TextSize::new(start), TextSize::new(end));
+        (self.source_range.contains_range(mapped)).then_some(mapped)
+    }
+
+    pub(crate) fn span(self, span: crate::Span) -> Option<crate::Span> {
+        let range = TextRange::new(
+            TextSize::new(u32::try_from(span.start).ok()?),
+            TextSize::new(u32::try_from(span.end).ok()?),
+        );
+        self.text_range(range).map(crate::diagnostic::span)
+    }
 }
 
 pub(crate) fn print_expression(
@@ -139,27 +172,44 @@ pub(crate) fn print_expression(
             |(_, element)| element_range(element).end(),
         ),
     );
+    let source_expression_start = expression_elements
+        .first()
+        .map_or(source_range.start(), |element| {
+            element_range(element).start()
+        });
     let wrapper = format!("{WRAPPER_PREFIX}{expression_text}{WRAPPER_SUFFIX}");
     let file = parse_wrapper(&wrapper, limits).map_err(|mut error| {
         error.span = Some(crate::diagnostic::span(source_range));
         error
     })?;
-    let expression = file
-        .items()
-        .find_map(|item| match item {
-            ast::Item::Fn(function) => function.body(),
-            _ => None,
-        })
-        .and_then(|body| {
-            body.statements().find_map(|statement| match statement {
-                ast::Stmt::LetStmt(statement) => statement.initializer(),
-                _ => None,
-            })
-        })
+    let mut items = file.items();
+    let Some(ast::Item::Fn(function)) = items.next() else {
+        return Err(error("println value expression is invalid", source_range));
+    };
+    if items.next().is_some() {
+        return Err(error("println value expression is invalid", source_range));
+    }
+    let body = function
+        .body()
+        .ok_or_else(|| error("println value expression is invalid", source_range))?;
+    let mut statements = body.statements();
+    let Some(ast::Stmt::LetStmt(statement)) = statements.next() else {
+        return Err(error("println value expression is invalid", source_range));
+    };
+    if statements.next().is_some() || body.tail_expr().is_some() {
+        return Err(error("println value expression is invalid", source_range));
+    }
+    let expression = statement
+        .initializer()
         .ok_or_else(|| error("println value expression is invalid", source_range))?;
     Ok(PrintExpression {
         expression,
         source_range,
+        range_map: ExpressionRangeMap {
+            wrapper_start: TextSize::new(WRAPPER_PREFIX.len() as u32),
+            source_start: source_expression_start,
+            source_range,
+        },
     })
 }
 

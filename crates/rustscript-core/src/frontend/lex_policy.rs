@@ -70,12 +70,15 @@ fn validate_token(
     range: std::ops::Range<usize>,
 ) -> Result<(), Diagnostic> {
     match kind {
-        SyntaxKind::WHITESPACE => Ok(()),
-        SyntaxKind::COMMENT
-            if text.starts_with("//") && !text.starts_with("///") && !text.starts_with("//!") =>
+        SyntaxKind::WHITESPACE
+            if text
+                .bytes()
+                .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n')) =>
         {
             Ok(())
         }
+        SyntaxKind::WHITESPACE => Err(error("unsupported whitespace", range)),
+        SyntaxKind::COMMENT if text.starts_with("//") && !is_doc_comment(text) => Ok(()),
         SyntaxKind::COMMENT => Err(error(
             "block and documentation comments are unsupported",
             range,
@@ -129,6 +132,10 @@ fn validate_token(
     }
 }
 
+fn is_doc_comment(text: &str) -> bool {
+    text.starts_with("//!") || (text.starts_with("///") && !text.starts_with("////"))
+}
+
 fn valid_integer(text: &str) -> bool {
     let Some(digits) = text.strip_suffix("_i64") else {
         return false;
@@ -169,6 +176,19 @@ mod tests {
     }
 
     #[test]
+    fn distinguishes_doc_and_ordinary_slash_comments() {
+        for source in [
+            "fn main() { //// ordinary\n}",
+            "fn main() { ////! ordinary\n}",
+        ] {
+            validate(source, Limits::default()).unwrap();
+        }
+        for source in ["fn main() { /// docs\n}", "fn main() { //! docs\n}"] {
+            assert!(validate(source, Limits::default()).is_err());
+        }
+    }
+
+    #[test]
     fn rejects_literal_variants() {
         for source in [
             "fn main(){1;}",
@@ -177,6 +197,28 @@ mod tests {
             "fn main(){\"x\";}",
         ] {
             assert!(validate(source, Limits::default()).is_err(), "{source}");
+        }
+    }
+
+    #[test]
+    fn propagates_lexed_str_error_ranges() {
+        let source = "fn main() { \"unterminated }";
+        let error = validate(source, Limits::default()).unwrap_err();
+        let start = source.find('"').expect("string start");
+        assert_eq!(
+            error.span,
+            Some(Span {
+                start,
+                end: source.len()
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_non_profile_ascii_whitespace() {
+        for whitespace in ['\u{000b}', '\u{000c}'] {
+            let source = format!("fn{whitespace}main() {{}}");
+            assert!(validate(&source, Limits::default()).is_err(), "{source:?}");
         }
     }
 }

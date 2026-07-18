@@ -10,19 +10,17 @@ use crate::{Diagnostic, Limits, Phase};
 
 /// Opaque owner of validated source and its rust-analyzer syntax tree.
 pub struct ParsedProgram {
-    source: String,
     file: ast::SourceFile,
     line_index: LineIndex,
     limits: Limits,
 }
 
 impl ParsedProgram {
-    pub fn source(&self) -> &str {
-        &self.source
+    /// Resolve a diagnostic location against this parsed source.
+    pub fn location(&self, diagnostic: &Diagnostic) -> Option<crate::Location> {
+        diagnostic.location(&self.line_index)
     }
-    pub fn line_index(&self) -> &LineIndex {
-        &self.line_index
-    }
+
     pub(crate) fn file(&self) -> &ast::SourceFile {
         &self.file
     }
@@ -38,7 +36,6 @@ pub(crate) fn parse(bytes: &[u8], limits: Limits) -> Result<ParsedProgram, Diagn
     let file = parse_syntax(&source, limits)?;
     Ok(ParsedProgram {
         line_index: LineIndex::new(&source),
-        source,
         file,
         limits,
     })
@@ -160,5 +157,74 @@ mod property_tests {
             Some(ast::Expr::BinExpr(ref rhs))
                 if rhs.op_kind() == Some(BinaryOp::LogicOp(LogicOp::And))
         ));
+    }
+
+    #[test]
+    fn enforces_syntax_function_and_parameter_limits() {
+        let syntax_error = parse_error(crate::parse(
+            "fn main() {}",
+            crate::Limits {
+                max_syntax_elements: 1,
+                ..crate::Limits::default()
+            },
+        ));
+        assert_eq!(syntax_error.message, "syntax element limit exceeded");
+
+        let function_error = parse_error(crate::parse(
+            "fn a() {} fn main() {}",
+            crate::Limits {
+                max_functions: 1,
+                ..crate::Limits::default()
+            },
+        ));
+        assert_eq!(
+            function_error.message,
+            "unsupported function limit exceeded"
+        );
+
+        let parameter_error = parse_error(crate::parse(
+            "fn helper(a: i64, b: i64) {} fn main() {}",
+            crate::Limits {
+                max_parameters: 1,
+                ..crate::Limits::default()
+            },
+        ));
+        assert_eq!(
+            parameter_error.message,
+            "unsupported parameter limit exceeded"
+        );
+    }
+
+    #[test]
+    fn rust_analyzer_dependencies_are_lockstep_edition_2024() {
+        let lock = include_str!("../../../../Cargo.lock");
+        assert_eq!(locked_version(lock, "ra_ap_parser"), Some("0.0.342"));
+        assert_eq!(locked_version(lock, "ra_ap_syntax"), Some("0.0.342"));
+
+        let lexed = ra_ap_parser::LexedStr::new(
+            ra_ap_parser::Edition::Edition2024,
+            "fn main() { async {}; }",
+        );
+        assert!(lexed.errors().next().is_none());
+        let parsed = ra_ap_syntax::SourceFile::parse(
+            "fn main() { async {}; }",
+            ra_ap_syntax::Edition::Edition2024,
+        );
+        assert!(parsed.errors().is_empty());
+    }
+
+    fn locked_version<'a>(lock: &'a str, package: &str) -> Option<&'a str> {
+        let marker = format!("name = \"{package}\"");
+        let start = lock.find(&marker)?;
+        lock[start..]
+            .lines()
+            .find_map(|line| line.strip_prefix("version = \"")?.strip_suffix('"'))
+    }
+
+    fn parse_error(result: Result<crate::ParsedProgram, crate::Diagnostic>) -> crate::Diagnostic {
+        match result {
+            Ok(_) => panic!("expected parse error"),
+            Err(error) => error,
+        }
     }
 }

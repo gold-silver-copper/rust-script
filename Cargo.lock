@@ -584,7 +584,6 @@ version = "0.1.0"
 dependencies = [
  "annotate-snippets",
  "rustscript-core",
- "tempfile",
 ]
 
 [[package]]
@@ -596,13 +595,13 @@ dependencies = [
  "ra_ap_parser",
  "ra_ap_syntax",
  "serde",
- "tempfile",
 ]
 
 [[package]]
 name = "rustscript-difftest"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
  "rustscript-core",
