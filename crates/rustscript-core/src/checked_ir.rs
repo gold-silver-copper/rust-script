@@ -1,4 +1,5 @@
 use ra_ap_syntax::SmolStr;
+use ra_ap_syntax::ast::{BinaryOp, UnaryOp};
 
 use crate::Span;
 
@@ -49,9 +50,37 @@ pub(crate) struct Parameter {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Block {
-    pub(crate) statements: Vec<Expression>,
+    pub(crate) statements: Vec<Statement>,
     pub(crate) tail: Option<Box<Expression>>,
     pub(crate) span: Span,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Statement {
+    Let {
+        id: LocalId,
+        name: SmolStr,
+        mutable: bool,
+        annotation: Option<Type>,
+        initializer: Expression,
+    },
+    Assign {
+        id: LocalId,
+        value: Expression,
+        span: Span,
+    },
+    While {
+        condition: Expression,
+        body: Block,
+        span: Span,
+    },
+    Return {
+        value: Expression,
+        span: Span,
+    },
+    Break(Span),
+    Continue(Span),
+    Expression(Expression),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,4 +93,24 @@ pub(crate) struct Expression {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ExpressionKind {
     Value(Value),
+    Local(LocalId),
+    Call {
+        function: FunctionId,
+        arguments: Vec<Expression>,
+    },
+    Unary {
+        op: UnaryOp,
+        operand: Box<Expression>,
+    },
+    Binary {
+        op: BinaryOp,
+        lhs: Box<Expression>,
+        rhs: Box<Expression>,
+    },
+    Block(Block),
+    If {
+        condition: Box<Expression>,
+        then_branch: Block,
+        else_branch: Block,
+    },
 }
