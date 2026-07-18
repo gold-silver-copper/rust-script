@@ -19,6 +19,31 @@ matrix, typed generator, differential oracle, artifact requirements, shrinker,
 and acceptance criteria remain normative unless this document explicitly
 overrides an implementation choice.
 
+## Explicit overrides of Issue #2
+
+This document supersedes the following Issue #2 requirements:
+
+- Replace the handwritten lexer and Pratt/precedence-climbing parser with a
+  bounded project-owned ASCII preflight scanner followed by `ra_ap_syntax`.
+- Replace the ban on full Rust parsers with the single-parser policy below.
+- Replace the `rustscript-core` std-only rule with the dependency allowlist in
+  this document.
+- Replace the three-crate workspace layout with the four-crate layout below,
+  including `rustscript-wasm`.
+- A public standalone `lex` function and project-owned token enum are no longer
+  required. The required frontend APIs are byte-oriented parsing, string
+  parsing, checking, running, and canonical formatting. Internal normalized
+  tokens may be used where helpful for validation and tests.
+- Lexer/parser tests and completion checkboxes in Issue #2 apply to the combined
+  preflight, `ra_ap_syntax`, whitelist-lowering frontend rather than to a
+  handwritten parser implementation.
+- The no-unsafe rule applies to project-owned workspace source, as clarified
+  below, rather than claiming that every transitive dependency is unsafe-free.
+
+All semantic behavior, language restrictions, resource limits, diagnostics,
+tests, differential properties, examples, and artifact requirements from Issue
+#2 remain in force.
+
 ## Priorities
 
 In descending order:
@@ -94,6 +119,12 @@ Parsing requirements:
   macro expansion, or HIR.
 - Do not use parser-specific AST nodes after lowering.
 - Never use `unwrap` or `expect` on user-controlled parsing paths.
+- Invoke the third-party parser behind `std::panic::catch_unwind` and convert a
+  parser unwind into a structured parse diagnostic. No dependency panic may
+  cross the public native or WASM API boundary.
+- Keep the core and WASM build profiles unwind-capable; do not set their panic
+  strategy to `abort`. The oracle's `-C panic=abort` flag applies only to
+  generated native comparison programs.
 
 Because `ra_ap_syntax` is an error-recovering parser, merely obtaining a syntax
 tree does not mean the source is accepted.
@@ -106,10 +137,15 @@ Before invoking the parser:
 - Reject invalid UTF-8.
 - Reject non-ASCII bytes.
 - Enforce maximum delimiter nesting of 256.
+- Enforce a maximum of 100,000 token-like units before invoking
+  `ra_ap_syntax`; stop scanning immediately when the limit is exceeded.
 - Recognize enough comment and string context that delimiters inside supported
   line comments or the exact `"{}"` token do not affect nesting.
 - Reject clearly forbidden block comments and documentation comments at their
   first useful span.
+- Implement preflight as a bounded, iterative scanner. It must not recurse,
+  allocate proportionally beyond the source limit, or continue after any limit
+  is exceeded.
 
 After parsing and before lowering:
 
@@ -118,8 +154,8 @@ After parsing and before lowering:
 - Maximum parameters per function: 256.
 - Maximum lowered AST nesting: 256.
 
-The source-size and preflight-depth limits protect the third-party parser;
-post-parse limits protect later phases.
+The source-size, token-work, delimiter-depth, and panic-containment safeguards
+protect the third-party parser boundary; post-parse limits protect later phases.
 
 ## Project-owned semantic implementation
 
@@ -210,6 +246,10 @@ Use this dependency set unless a documented implementation blocker requires a
 change:
 
 ```toml
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+
 [workspace.dependencies]
 rustscript-core = { path = "crates/rustscript-core" }
 
@@ -238,6 +278,9 @@ proptest = {
     features = ["std", "bit-set"],
 }
 ```
+
+`ra_ap_syntax 0.0.342` declares Rust 1.95 as its minimum supported Rust
+version. Update the dependency and workspace MSRV together.
 
 Package-level dependency boundaries:
 
@@ -283,11 +326,15 @@ Do not add:
 - `anyhow` in library APIs.
 - `rhai`, `rune`, `wasmtime`, `wasmer`, or another scripting engine.
 - A second parser, formatter, AST framework, or diagnostic framework.
-- Dependencies that introduce OS functionality into the WASM graph.
+- Direct dependencies in `rustscript-core` or `rustscript-wasm` that require
+  unavailable OS services at runtime. A required transitive crate may contain
+  native or thread-related code only when the selected feature set compiles for
+  `wasm32-unknown-unknown` and the WASM execution path does not invoke it.
 
 All workspace source must use `#![forbid(unsafe_code)]`. This restriction
-applies to project-owned crates; audited unsafe code inside transitive
-dependencies is not considered project source.
+applies to project-owned crates. Transitive dependencies may contain unsafe
+internals and must be reviewed as part of dependency selection; they are not
+covered by the workspace-source prohibition.
 
 ## WASM requirements
 
