@@ -31,7 +31,9 @@ jobs:
         with:
           node-version: "24"
       - uses: browser-actions/setup-firefox@v1
-      - uses: taiki-e/install-action@wasm-pack
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
       - run: cargo check -p rustscript-wasm --target wasm32-unknown-unknown
       - run: wasm-pack test --node crates/rustscript-wasm
       - run: wasm-pack test --headless --firefox crates/rustscript-wasm --test browser
@@ -44,7 +46,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: taiki-e/install-action@cargo-fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
       - run: cargo +nightly fuzz build parser_bytes
         working-directory: fuzz
       - run: cargo +nightly fuzz build ast_roundtrip
