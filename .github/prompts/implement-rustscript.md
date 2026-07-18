@@ -37,8 +37,13 @@ This document supersedes the following Issue #2 requirements:
 - Lexer/parser tests and completion checkboxes in Issue #2 apply to the combined
   preflight, `ra_ap_syntax`, whitelist-lowering frontend rather than to a
   handwritten parser implementation.
-- The no-unsafe rule applies to project-owned workspace source, as clarified
-  below, rather than claiming that every transitive dependency is unsafe-free.
+- The no-unsafe rule applies to all project-owned crate and fuzz-target source,
+  as clarified below, rather than claiming that every transitive dependency is
+  unsafe-free.
+- Issue #2's absolute parser-no-panic criterion is refined as follows:
+  project-owned frontend code must not panic; dependency unwinds must be caught
+  where the target supports unwinding; browser use must isolate the
+  abort-on-panic WASM module in a replaceable Web Worker as described below.
 
 All semantic behavior, language restrictions, resource limits, diagnostics,
 tests, differential properties, examples, and artifact requirements from Issue
@@ -119,12 +124,12 @@ Parsing requirements:
   macro expansion, or HIR.
 - Do not use parser-specific AST nodes after lowering.
 - Never use `unwrap` or `expect` on user-controlled parsing paths.
-- Invoke the third-party parser behind `std::panic::catch_unwind` and convert a
-  parser unwind into a structured parse diagnostic. No dependency panic may
-  cross the public native or WASM API boundary.
-- Keep the core and WASM build profiles unwind-capable; do not set their panic
-  strategy to `abort`. The oracle's `-C panic=abort` flag applies only to
-  generated native comparison programs.
+- On native targets that support unwinding, invoke the third-party parser behind
+  `std::panic::catch_unwind` and convert a parser unwind into a structured parse
+  diagnostic.
+- Do not claim that `catch_unwind` contains panics on
+  `wasm32-unknown-unknown`. That target aborts on panic; use the Web Worker
+  isolation requirement below for untrusted browser input.
 
 Because `ra_ap_syntax` is an error-recovering parser, merely obtaining a syntax
 tree does not mean the source is accepted.
@@ -137,6 +142,8 @@ Before invoking the parser:
 - Reject invalid UTF-8.
 - Reject non-ASCII bytes.
 - Enforce maximum delimiter nesting of 256.
+- Reject every lexeme that cannot occur in the subset before invoking the full
+  parser. This early lexical whitelist is part of the bounded preflight scanner.
 - Enforce a maximum of 100,000 token-like units before invoking
   `ra_ap_syntax`; stop scanning immediately when the limit is exceeded.
 - Recognize enough comment and string context that delimiters inside supported
@@ -154,8 +161,11 @@ After parsing and before lowering:
 - Maximum parameters per function: 256.
 - Maximum lowered AST nesting: 256.
 
-The source-size, token-work, delimiter-depth, and panic-containment safeguards
-protect the third-party parser boundary; post-parse limits protect later phases.
+The source-size, lexical-whitelist, token-work, and delimiter-depth safeguards
+bound input presented to the third-party parser; post-parse limits protect later
+phases. They do not prove that a third-party parser can never abort because of
+an internal defect. Native builds contain unwind panics, browser builds use
+worker isolation, and fuzzing continuously tests this dependency boundary.
 
 ## Project-owned semantic implementation
 
@@ -331,10 +341,10 @@ Do not add:
   native or thread-related code only when the selected feature set compiles for
   `wasm32-unknown-unknown` and the WASM execution path does not invoke it.
 
-All workspace source must use `#![forbid(unsafe_code)]`. This restriction
-applies to project-owned crates. Transitive dependencies may contain unsafe
-internals and must be reviewed as part of dependency selection; they are not
-covered by the workspace-source prohibition.
+All project-owned crate and fuzz-target source must use
+`#![forbid(unsafe_code)]`. Transitive dependencies may contain unsafe internals
+and must be reviewed as part of dependency selection; they are not covered by
+the project-source prohibition.
 
 ## WASM requirements
 
@@ -359,6 +369,18 @@ Native-only dependencies must not appear in the `rustscript-wasm` target graph.
 
 The browser package does not run rustc differential tests. Differential
 conformance is established in native CI before publishing the WASM artifact.
+
+`wasm32-unknown-unknown` aborts rather than unwinds on panic. Ship a small
+JavaScript host wrapper that runs the WASM module in a dedicated Web Worker for
+untrusted scripts. If the worker terminates unexpectedly, the wrapper must:
+
+1. Report a generic structured `frontend-aborted` failure to the caller.
+2. Discard the failed worker and module instance.
+3. Start a clean worker before processing another request.
+
+Document that this worker boundary contains a residual third-party parser abort;
+the Rust WASM function itself cannot convert such an abort into a diagnostic.
+Do not represent this limitation as successful parser recovery.
 
 ## Diagnostics
 
