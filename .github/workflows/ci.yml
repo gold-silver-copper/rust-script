@@ -49,7 +49,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-fuzz
-      - run: cargo +nightly fuzz build parser_bytes
+      - run: |
+          host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+          cargo +nightly fuzz build parser_bytes --target "$host"
         working-directory: fuzz
-      - run: cargo +nightly fuzz build ast_roundtrip
+      - run: |
+          host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+          cargo +nightly fuzz build ast_roundtrip --target "$host"
         working-directory: fuzz
