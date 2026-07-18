@@ -8,6 +8,8 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use rand_chacha::ChaCha8Rng;
+use rand_core::{Rng, SeedableRng};
 use wait_timeout::ChildExt;
 
 const DEFAULT_STREAM_CAP: usize = 1024 * 1024;
@@ -43,6 +45,38 @@ pub struct OracleResult {
     pub rustc_argv: Vec<String>,
     pub compiler: ProcessCapture,
     pub native: Option<ProcessCapture>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiffFailureKind {
+    PrettyPrintRoundTrip,
+    RustcRejectedAcceptedProgram,
+    NativeTimeout,
+    NativeFailure,
+    StdoutMismatch,
+    UnexpectedNativeStderr,
+    NondeterministicInterpreter,
+}
+
+#[derive(Clone, Debug)]
+pub struct DiffFailure {
+    pub kind: DiffFailureKind,
+    pub seed: u64,
+    pub case_index: usize,
+    pub source: String,
+    pub canonical: String,
+    pub reason: String,
+    pub interpreter_stdout: Vec<u8>,
+    pub oracle: Option<OracleResult>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaseSuccess {
+    pub seed: u64,
+    pub case_index: usize,
+    pub source: String,
+    pub stdout: Vec<u8>,
+    pub steps: u64,
 }
 
 #[derive(Debug)]
@@ -142,6 +176,200 @@ impl RustcOracle {
             native,
         })
     }
+}
+
+pub fn run_case(
+    seed: u64,
+    case_index: usize,
+    oracle: &RustcOracle,
+) -> Result<CaseSuccess, Box<DiffFailure>> {
+    let mut rng = ChaCha8Rng::seed_from_u64(seed ^ (case_index as u64).rotate_left(29));
+    let mut decisions = [0_u64; 32];
+    for decision in &mut decisions {
+        *decision = rng.next_u64();
+    }
+    let generated = rustscript_core::generate_checked_program(&decisions);
+    let source = rustscript_core::format(&generated);
+    let checked = rustscript_core::check_source(&source, rustscript_core::Limits::default())
+        .map_err(|error| {
+            failure(
+                DiffFailureKind::PrettyPrintRoundTrip,
+                seed,
+                case_index,
+                &source,
+                &source,
+                format!("canonical source failed checking: {error}"),
+                Vec::new(),
+                None,
+            )
+        })?;
+    let canonical = rustscript_core::format(&checked);
+    if canonical != source {
+        return Err(failure(
+            DiffFailureKind::PrettyPrintRoundTrip,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            "canonical emitter was not idempotent".into(),
+            Vec::new(),
+            None,
+        ));
+    }
+    let limits = rustscript_core::RuntimeLimits::default();
+    let first = rustscript_core::run(&checked, limits).map_err(|error| {
+        failure(
+            DiffFailureKind::PrettyPrintRoundTrip,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            format!("generated program trapped: {error}"),
+            Vec::new(),
+            None,
+        )
+    })?;
+    let second = rustscript_core::run(&checked, limits).map_err(|error| {
+        failure(
+            DiffFailureKind::NondeterministicInterpreter,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            format!("second interpreter run failed: {error}"),
+            first.output.clone(),
+            None,
+        )
+    })?;
+    if first != second {
+        return Err(failure(
+            DiffFailureKind::NondeterministicInterpreter,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            "repeated interpreter runs differed".into(),
+            first.output,
+            None,
+        ));
+    }
+    let result = oracle.run_source(&canonical).map_err(|error| {
+        failure(
+            DiffFailureKind::NativeFailure,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            format!("oracle failed: {error}"),
+            first.output.clone(),
+            None,
+        )
+    })?;
+    if !result.compiler.success {
+        return Err(failure(
+            DiffFailureKind::RustcRejectedAcceptedProgram,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            "rustc rejected an accepted program".into(),
+            first.output,
+            Some(result),
+        ));
+    }
+    let Some(native) = result.native.as_ref() else {
+        return Err(failure(
+            DiffFailureKind::NativeFailure,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            "native result was missing".into(),
+            first.output,
+            Some(result),
+        ));
+    };
+    if native.timed_out {
+        return Err(failure(
+            DiffFailureKind::NativeTimeout,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            "native program timed out".into(),
+            first.output,
+            Some(result),
+        ));
+    }
+    if !native.success {
+        return Err(failure(
+            DiffFailureKind::NativeFailure,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            "native program failed".into(),
+            first.output,
+            Some(result),
+        ));
+    }
+    if !native.stderr.is_empty() {
+        return Err(failure(
+            DiffFailureKind::UnexpectedNativeStderr,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            "native program wrote stderr".into(),
+            first.output,
+            Some(result),
+        ));
+    }
+    if native.stdout != first.output {
+        return Err(failure(
+            DiffFailureKind::StdoutMismatch,
+            seed,
+            case_index,
+            &source,
+            &canonical,
+            "native and interpreter stdout differed".into(),
+            first.output,
+            Some(result),
+        ));
+    }
+    Ok(CaseSuccess {
+        seed,
+        case_index,
+        source,
+        stdout: first.output,
+        steps: first.steps,
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "failure artifacts require the complete case context"
+)]
+fn failure(
+    kind: DiffFailureKind,
+    seed: u64,
+    case_index: usize,
+    source: &str,
+    canonical: &str,
+    reason: String,
+    interpreter_stdout: Vec<u8>,
+    oracle: Option<OracleResult>,
+) -> Box<DiffFailure> {
+    Box::new(DiffFailure {
+        kind,
+        seed,
+        case_index,
+        source: source.into(),
+        canonical: canonical.into(),
+        reason,
+        interpreter_stdout,
+        oracle,
+    })
 }
 
 fn compile_arguments(source: &Path, executable: &Path) -> Vec<OsString> {
@@ -299,5 +527,18 @@ mod tests {
         let native = result.native.unwrap();
         assert!(native.timed_out);
         assert!(!native.success);
+    }
+
+    #[test]
+    fn deterministic_twenty_five_case_differential_smoke_corpus() {
+        let oracle = RustcOracle::discover(None);
+        for case_index in 0..25 {
+            if let Err(failure) = run_case(1, case_index, &oracle) {
+                panic!(
+                    "seed 1 case {case_index} failed: {:?}: {}",
+                    failure.kind, failure.reason
+                );
+            }
+        }
     }
 }

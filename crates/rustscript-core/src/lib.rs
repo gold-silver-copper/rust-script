@@ -6,6 +6,8 @@ mod diagnostic;
 mod emit;
 mod eval;
 mod frontend;
+#[cfg(feature = "generator-support")]
+mod generator_support;
 mod limits;
 mod typeck;
 
@@ -13,6 +15,8 @@ pub use checked_ir::{CheckedProgram, Type, Value};
 pub use diagnostic::{Diagnostic, Location, Phase, Span};
 pub use eval::{Execution, RuntimeLimits};
 pub use frontend::ParsedProgram;
+#[cfg(feature = "generator-support")]
+pub use generator_support::generate_checked_program;
 pub use limits::Limits;
 
 /// Validate and parse UTF-8 source using the strict rustscript profile.
