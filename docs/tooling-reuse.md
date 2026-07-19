@@ -10,6 +10,7 @@ project token model, parser cursor, syntax AST, precedence table, or line index.
 | Rust 2024 parsing | `ra_ap_syntax::SourceFile::parse` | Native unwind containment and strict rejection of parser errors/recovery nodes |
 | Parser validation | `Parse::errors`, `SyntaxKind::ERROR` | Stable diagnostic conversion |
 | Typed syntax admission | `ast::Item`, `ast::Stmt`, `ast::Expr`, `ast::Type`, `ast::Pat`, and AST traits | Exhaustive strict-subset admission |
+| Statement boundaries | `ast::Stmt` variants and statement token ownership | Reject a direct `SEMICOLON` with no `LetStmt`/`ExprStmt` owner because rust-analyzer intentionally exposes no empty-statement AST node |
 | Operator identity and precedence | `PrefixExpr::op_kind`, `BinExpr::op_kind`, and rust-analyzer operator enums/tree shape | Three-type operator rules; no precedence implementation |
 | Macro envelope | `MacroCall` path accessors and `TokenTree::token_trees_and_tokens` | Exact `println!("{}", expression)` policy |
 | Macro value expression | A bounded wrapper parsed only by `SourceFile::parse` | Required because macro token trees are opaque; no token-tree expression parser is implemented |
@@ -90,7 +91,11 @@ execution if the API blocker is removed, on every rust-analyzer upgrade.
 synchronous parse-result dropping. WASM tests repeatedly parse valid/invalid
 programs, obtain syntax/error results, and drop them. The browser Worker
 recovery test imports the production `host.js` through the `wasm-bindgen-test`
-browser server and exercises worker abort replacement without adding
-runtime-only JavaScript dependencies. Revalidate the cfg in the dependency
-source and rerun the browser/Node tests whenever the exact rust-analyzer pins
-change.
+browser server and uses real browser Workers to force an abort, observe
+`frontend-aborted`, and verify that the host terminates and replaces the failed
+Worker. The production `worker.js` and generated WASM module are covered by the
+Node Worker integration test. The direct `wasm-bindgen-futures` dev-dependency
+is a documented test-only exception: `wasm-bindgen` expands the asynchronous
+imported JavaScript test through that crate, while no production adapter path
+uses it. Revalidate the cfg in the dependency source and rerun the browser/Node
+tests whenever the exact rust-analyzer pins change.

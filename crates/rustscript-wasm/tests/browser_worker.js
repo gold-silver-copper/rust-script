@@ -1,27 +1,31 @@
 import { RustscriptWorkerHost } from "/host.js";
 
-export function browserWorkerRecovery() {
+export async function browserWorkerRecovery() {
   const workers = [];
+  const objectUrls = [];
+  const sources = [
+    `self.onmessage = () => {
+      throw new Error("intentional rustscript worker abort");
+    };`,
+    `self.onmessage = ({ data }) => {
+      self.postMessage({ id: data.id, result: { ok: true } });
+    };`,
+  ];
   const host = new RustscriptWorkerHost("unused-worker-url", () => {
-    const worker = {
-      terminated: false,
-      terminate() {
-        this.terminated = true;
-      },
-      postMessage() {
-        throw new Error("the Rust test drives the browser failure path directly");
-      },
-    };
+    const source = sources[workers.length];
+    if (source === undefined) throw new Error("unexpected worker generation");
+    const url = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+    objectUrls.push(url);
+    const worker = new TrackedWorker(new Worker(url, { type: "module" }));
     workers.push(worker);
     return worker;
   });
 
   try {
-    let failed;
-    host.pending.set(1, (result) => {
-      failed = result;
-    });
-    host.handleWorkerFailure(workers[0]);
+    const failed = await withTimeout(
+      host.request("check", "fn main() {}"),
+      "worker abort",
+    );
     if (failed.ok || failed.error?.message !== "frontend-aborted") {
       throw new Error(`unexpected failure response: ${JSON.stringify(failed)}`);
     }
@@ -29,16 +33,60 @@ export function browserWorkerRecovery() {
       throw new Error("failed worker was not terminated");
     }
 
-    let recovered;
-    host.pending.set(2, (result) => {
-      recovered = result;
-    });
-    workers[1].onmessage({ data: { id: 2, result: { ok: true } } });
+    const recovered = await withTimeout(host.request("check", "fn main() {}"), "replacement");
     if (!recovered.ok) {
       throw new Error(`replacement worker did not answer: ${JSON.stringify(recovered)}`);
     }
     return workers.length;
   } finally {
     host.close();
+    for (const url of objectUrls) URL.revokeObjectURL(url);
   }
+}
+
+class TrackedWorker {
+  constructor(worker) {
+    this.worker = worker;
+    this.terminated = false;
+  }
+
+  set onmessage(handler) {
+    this.worker.onmessage = handler;
+  }
+
+  set onerror(handler) {
+    this.worker.onerror = handler;
+  }
+
+  set onmessageerror(handler) {
+    this.worker.onmessageerror = handler;
+  }
+
+  postMessage(message) {
+    this.worker.postMessage(message);
+  }
+
+  terminate() {
+    this.terminated = true;
+    this.worker.terminate();
+  }
+}
+
+function withTimeout(promise, stage) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error(`worker recovery timed out during ${stage}`)),
+      10_000,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
 }

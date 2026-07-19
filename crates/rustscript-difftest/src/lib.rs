@@ -668,7 +668,7 @@ pub fn write_failure_artifact_with_oracle(
 
     let frontend = rustscript_core::Limits::default();
     let runtime = rustscript_core::RuntimeLimits::default();
-    let rustc_version = failure
+    let mut rustc_version = failure
         .oracle
         .as_ref()
         .map(|result| result.rustc_version.clone())
@@ -680,6 +680,9 @@ pub fn write_failure_artifact_with_oracle(
             })
         })
         .unwrap_or_else(|| "unavailable: no oracle provided".into());
+    if !rustc_version.ends_with('\n') {
+        rustc_version.push('\n');
+    }
     let reproduce_argv = runner_argv(
         failure.seed,
         failure.case_index,
@@ -1312,5 +1315,13 @@ mod tests {
         assert!(metadata.contains("artifact_rustc_argv_json=["));
         assert!(metadata.contains("rustc_argv_json=["));
         assert!(metadata.contains("failure.rs"));
+
+        let missing_oracle = RustcOracle::discover(Some(root.path().join("missing-rustc")));
+        let unavailable =
+            write_failure_artifact_with_oracle(&failure, root.path(), Some(&missing_oracle))
+                .unwrap();
+        let metadata = std::fs::read_to_string(unavailable.join("metadata.txt")).unwrap();
+        assert!(metadata.contains("unavailable:"));
+        assert!(metadata.contains("\nfrontend_max_source_bytes="));
     }
 }

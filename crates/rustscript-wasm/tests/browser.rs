@@ -10,8 +10,8 @@ wasm_bindgen_test_configure!(run_in_browser);
 
 #[wasm_bindgen(module = "/tests/browser_worker.js")]
 extern "C" {
-    #[wasm_bindgen(js_name = browserWorkerRecovery)]
-    fn browser_worker_recovery() -> JsValue;
+    #[wasm_bindgen(catch, js_name = browserWorkerRecovery)]
+    async fn browser_worker_recovery() -> Result<JsValue, JsValue>;
 }
 
 #[derive(Deserialize)]
@@ -74,8 +74,10 @@ fn browser_exports_run_and_report_structured_failures() {
 }
 
 #[wasm_bindgen_test]
-fn browser_host_reports_worker_abort_and_replaces_worker() {
-    let generations = browser_worker_recovery();
+async fn browser_host_reports_worker_abort_and_replaces_worker() {
+    let generations = browser_worker_recovery()
+        .await
+        .expect("browser worker recovery helper");
     assert_eq!(generations.as_f64(), Some(2.0));
 }
 

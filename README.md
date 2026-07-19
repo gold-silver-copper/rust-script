@@ -27,10 +27,11 @@ coverage and dependency fuzz findings.
 
 ## Exact language profile
 
-Source is at most 1 MiB, valid UTF-8, and ASCII-only. Space, tab, CR, LF, and
-ordinary `//` comments are accepted. Attributes, doc/block comments, raw
-identifiers, Unicode, strings other than the print placeholder, character/byte
-literals, numeric bases, floats, and unsupported punctuation are rejected.
+By default, source is limited to 1 MiB; it must be valid UTF-8 and ASCII-only.
+Space, tab, CR, LF, and ordinary `//` comments are accepted. Attributes,
+doc/block comments, raw identifiers, Unicode, strings other than the print
+placeholder, character/byte literals, numeric bases, floats, and unsupported
+punctuation are rejected.
 
 The only source types are `i64`, `bool`, and `()`. Integers use decimal
 `DIGITS_i64` spelling with no internal separators. `i64::MIN` cannot be written
