@@ -1004,7 +1004,7 @@ fn receive_reader(
 fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
     let process_group = format!("-{}", child.id());
     let group_kill_succeeded = Command::new("kill")
-        .args(["-KILL", &process_group])
+        .args(["-KILL", "--", &process_group])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
