@@ -5,17 +5,41 @@ use crate::{Diagnostic, Limits, Phase, Span};
 pub(super) fn validate(source: &str, limits: Limits) -> Result<(), Diagnostic> {
     let lexed = LexedStr::new(Edition::Edition2024, source);
     if lexed.len() > limits.max_tokens {
-        let start = lexed.text_start(limits.max_tokens.min(lexed.len()));
-        return Err(error("token limit exceeded", start..start));
+        return Err(error(
+            "token limit exceeded",
+            lexed.text_range(limits.max_tokens.min(lexed.len() - 1)),
+        ));
     }
     if let Some((index, message)) = lexed.errors().next() {
         return Err(error(message, lexed.text_range(index)));
     }
 
     let mut delimiters = Vec::new();
+    let mut prefix_run = 0usize;
     for index in 0..lexed.len() {
         let kind = lexed.kind(index);
         let text = lexed.text(index);
+        // `SourceFile::parse` recurses on prefix-position tokens (`-x`, `!x`,
+        // `&x`, `*x`, `||`-closures, `return return ...`), which delimiter
+        // depth cannot bound. A long homogeneous run would overflow the parser
+        // stack (an abort, not an unwind), so cap runs at the same value as
+        // the post-parse syntax nesting limit before parsing ever starts.
+        if !matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
+            if matches!(
+                kind,
+                T![-] | T![!] | T![&] | T![|] | T![*] | T![return] | T![break]
+            ) {
+                prefix_run += 1;
+                if prefix_run > limits.max_syntax_depth {
+                    return Err(error(
+                        "prefix operator nesting limit exceeded",
+                        lexed.text_range(index),
+                    ));
+                }
+            } else {
+                prefix_run = 0;
+            }
+        }
         if matches!(kind, T![&] | T![|]) {
             let paired_before = index > 0
                 && lexed.kind(index - 1) == kind
@@ -64,6 +88,10 @@ fn close(
     }
 }
 
+// `LexedStr` wraps `rustc_lexer`, which emits only single-character
+// punctuation; compound operators (`->`, `==`, `<=`, `&&`, `||`, ...) arrive
+// as adjacent singles and are glued back together by `SourceFile::parse`.
+// The whitelist therefore lists only single-character punctuation kinds.
 fn validate_token(
     kind: SyntaxKind,
     text: &str,
@@ -112,7 +140,6 @@ fn validate_token(
         | T![;]
         | T![,]
         | T![:]
-        | T![->]
         | T![=]
         | T![!]
         | T![-]
@@ -120,14 +147,8 @@ fn validate_token(
         | T![*]
         | T![/]
         | T![%]
-        | T![==]
-        | T![!=]
         | T![<]
-        | T![<=]
-        | T![>]
-        | T![>=]
-        | T![&&]
-        | T![||] => Ok(()),
+        | T![>] => Ok(()),
         _ => Err(error(format!("unsupported token `{text}`"), range)),
     }
 }
@@ -212,6 +233,32 @@ mod tests {
                 end: source.len()
             })
         );
+    }
+
+    #[test]
+    fn bounds_prefix_operator_runs_before_parsing() {
+        // Each of these previously reached `SourceFile::parse` and overflowed
+        // the parser stack (a process abort `catch_unwind` cannot contain).
+        for operator in ["-", "!", "&", "|", "*", "return ", "break "] {
+            let source = format!("fn main() {{ let x = {}1_i64; }}", operator.repeat(20_000));
+            let error = validate(&source, Limits::default()).unwrap_err();
+            assert_eq!(error.message, "prefix operator nesting limit exceeded");
+        }
+    }
+
+    #[test]
+    fn allows_prefix_runs_up_to_the_nesting_limit() {
+        let limits = Limits::default();
+        let source = format!(
+            "fn main() {{ let x = {}1_i64; }}",
+            "-".repeat(limits.max_syntax_depth)
+        );
+        validate(&source, limits).unwrap();
+        let source = format!(
+            "fn main() {{ let x = {}1_i64; }}",
+            "-".repeat(limits.max_syntax_depth + 1)
+        );
+        assert!(validate(&source, limits).is_err());
     }
 
     #[test]

@@ -9,6 +9,10 @@ use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, WalkEvent, ast};
 use crate::{Diagnostic, Limits, Phase};
 
 /// Opaque owner of validated source and its rust-analyzer syntax tree.
+///
+/// The original source `String` is not retained separately: the lossless
+/// rowan green tree reproduces the exact text, and positions resolve through
+/// the stored [`LineIndex`].
 pub struct ParsedProgram {
     file: ast::SourceFile,
     line_index: LineIndex,
@@ -193,6 +197,17 @@ mod property_tests {
             parameter_error.message,
             "unsupported parameter limit exceeded"
         );
+    }
+
+    #[test]
+    fn long_prefix_operator_runs_are_rejected_without_aborting() {
+        // Regression: pre-lex bounds must stop these before `SourceFile::parse`
+        // recurses itself into a fatal (non-unwinding) stack overflow.
+        for operator in ["-", "!", "&", "*"] {
+            let source = format!("fn main() {{ let x = {}1_i64; }}", operator.repeat(50_000));
+            let error = parse_error(crate::parse(&source, crate::Limits::default()));
+            assert_eq!(error.message, "prefix operator nesting limit exceeded");
+        }
     }
 
     #[test]
