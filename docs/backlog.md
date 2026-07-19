@@ -19,9 +19,14 @@ Do not delete this file's structure.
       seeds are not repeated: tried so far — seed 1 (×1000, ×200, ×100),
       seed 7 (×100), seed 12345 (spot), seed 424242 (×5000, PASSED
       2026-07-18). No mismatch found at any seed to date.
-- [ ] Property test that `format_program` output always reparses+rechecks
-      to structurally equal IR for arbitrary *admitted* (not generated)
-      sources harvested from the fuzz corpus.
+- [x] Property test for the parsed-tree emitter (`format_program`). Done
+      2026-07-19: `format_program_is_idempotent_and_preserves_checked_ir`
+      (feature-gated proptest) generates admitted programs, then asserts
+      `format_program` is idempotent, agrees with the checked-IR emitter,
+      and preserves the checked IR through a reparse — generalizing the
+      fixed-source drift guard to arbitrary generated programs. (Uses
+      generated admitted sources rather than fuzz-corpus harvesting, since
+      `fuzz/corpus/` is gitignored and non-deterministic.)
 
 ## P3 — robustness & tooling polish
 

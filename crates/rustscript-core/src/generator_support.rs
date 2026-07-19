@@ -1425,7 +1425,7 @@ impl StructuralExpressionMatch for Expression {
 #[cfg(test)]
 mod tests {
     use crate::checked_ir::{Block, CheckedProgram, Expression, ExpressionKind, Statement};
-    use crate::{Limits, ParseLimits, check_source, format, run};
+    use crate::{Limits, ParseLimits, check_source, format, format_program, parse, run};
     use proptest::prelude::*;
 
     #[test]
@@ -1513,6 +1513,34 @@ mod tests {
             let first = run(&checked, Limits::default())?;
             let second = run(&checked, Limits::default())?;
             prop_assert_eq!(first, second);
+        }
+
+        // The parsed-tree emitter (`format_program`) over arbitrary admitted
+        // sources: it must be idempotent, agree with the checked-IR emitter,
+        // and preserve the checked IR through a reparse. This generalizes the
+        // fixed-source emitter-agreement drift guard to generated programs.
+        #[test]
+        fn format_program_is_idempotent_and_preserves_checked_ir(
+            decisions in prop::collection::vec(any::<u64>(), 0..96),
+        ) {
+            let generated = super::generate_checked_program(&decisions);
+            let source = format(&generated);
+            let parsed = parse(&source, ParseLimits::default())
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+
+            let canonical = format_program(&parsed);
+            // The two emitters produce the same canonical text.
+            prop_assert_eq!(&canonical, &source);
+
+            let reparsed = parse(&canonical, ParseLimits::default())
+                .map_err(|error| TestCaseError::fail(error.to_string()))?;
+            // Idempotence through a reparse.
+            prop_assert_eq!(&format_program(&reparsed), &canonical);
+
+            // The checked IR is preserved across the parsed-tree emit + reparse.
+            let before = check_source(&source, ParseLimits::default())?;
+            let after = check_source(&canonical, ParseLimits::default())?;
+            prop_assert!(before.structurally_eq(&after));
         }
     }
 
