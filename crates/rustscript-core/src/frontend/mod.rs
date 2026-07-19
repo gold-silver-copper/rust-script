@@ -45,7 +45,10 @@ pub(crate) fn parse(bytes: &[u8], limits: ParseLimits) -> Result<ParsedProgram, 
     })
 }
 
-fn parse_syntax_uncontained(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
+fn parse_syntax_uncontained(
+    source: &str,
+    limits: ParseLimits,
+) -> Result<ast::SourceFile, Diagnostic> {
     let parsed = SourceFile::parse(source, Edition::Edition2024);
     if let Some(error) = parsed.errors().first() {
         return Err(Diagnostic::new(

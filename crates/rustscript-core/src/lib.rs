@@ -18,7 +18,9 @@ pub use diagnostic::{Diagnostic, Location, Phase, Span};
 pub use eval::{Limits, RunResult, RuntimeDiagnostic};
 pub use frontend::ParsedProgram;
 #[cfg(feature = "generator-support")]
-pub use generator_support::{generate_checked_program, reduction_candidates};
+pub use generator_support::{
+    GENERATOR_LIMITS, GeneratorLimits, generate_checked_program, reduction_candidates,
+};
 pub use limits::ParseLimits;
 
 /// Validate and parse UTF-8 source using the strict rustscript profile.
@@ -32,13 +34,23 @@ pub fn parse_bytes(source: &[u8], limits: ParseLimits) -> Result<ParsedProgram, 
 }
 
 /// Type-check a previously parsed program and lower it to executable IR.
+///
+/// Reports one diagnostic per failing function body, in source order.
 pub fn check(parsed: &ParsedProgram) -> Result<CheckedProgram, Vec<Diagnostic>> {
-    typeck::check(parsed).map_err(|error| vec![error])
+    typeck::check(parsed)
 }
 
-/// Parse and type-check source in one operation.
+/// Parse and type-check source in one operation, reporting the first error.
 pub fn check_source(source: &str, limits: ParseLimits) -> Result<CheckedProgram, Diagnostic> {
-    typeck::check(&parse(source, limits)?)
+    typeck::check(&parse(source, limits)?).map_err(|diagnostics| {
+        diagnostics.into_iter().next().unwrap_or_else(|| {
+            Diagnostic::new(
+                Phase::Type,
+                "type checking failed without a diagnostic",
+                None,
+            )
+        })
+    })
 }
 
 /// Execute a checked program with deterministic safeguards.

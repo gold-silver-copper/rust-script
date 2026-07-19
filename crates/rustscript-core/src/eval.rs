@@ -95,7 +95,7 @@ pub(crate) fn run(
         call_depth: 0,
     };
     let outcome = match evaluator.call(program.main, Vec::new(), None) {
-        Ok(value) if value == Value::Unit => Ok(()),
+        Ok(Value::Unit) => Ok(()),
         Ok(_) => Err(runtime_error("main returned a non-unit value", None)),
         Err(diagnostic) => Err(diagnostic),
     };

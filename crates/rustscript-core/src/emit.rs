@@ -84,7 +84,7 @@ impl SyntaxEmitter {
         self.output.push('{');
         let statements: Vec<_> = block.statements().collect();
         let tail = block.tail_expr();
-        if statements.is_empty() && is_syntax_implicit_unit(tail.as_ref()) {
+        if statements.is_empty() && (tail.is_none() || is_syntax_implicit_unit(tail.as_ref())) {
             self.output.push('}');
             return;
         }
@@ -244,11 +244,8 @@ impl SyntaxEmitter {
             ast::Expr::PathExpr(path) => self.path_name(path),
             ast::Expr::PrefixExpr(prefix) => {
                 self.output.push('(');
-                self.output.push_str(match prefix.op_kind() {
-                    Some(UnaryOp::Neg) => "-",
-                    Some(UnaryOp::Not) => "!",
-                    Some(UnaryOp::Deref) | None => "__unsupported_unary",
-                });
+                self.output
+                    .push_str(prefix.op_kind().map_or("__unsupported_unary", unary_text));
                 if let Some(operand) = prefix.expr() {
                     self.expression(operand, indent);
                 } else {
@@ -543,11 +540,7 @@ impl Emitter<'_> {
             }
             ExpressionKind::Unary { op, operand } => {
                 self.output.push('(');
-                self.output.push_str(match op {
-                    UnaryOp::Neg => "-",
-                    UnaryOp::Not => "!",
-                    UnaryOp::Deref => "*",
-                });
+                self.output.push_str(unary_text(*op));
                 self.expression(operand, indent);
                 self.output.push(')');
             }
@@ -607,6 +600,14 @@ fn type_name(ty: Type) -> &'static str {
         Type::I64 => "i64",
         Type::Bool => "bool",
         Type::Unit => "()",
+    }
+}
+
+fn unary_text(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::Neg => "-",
+        UnaryOp::Not => "!",
+        UnaryOp::Deref => "*",
     }
 }
 

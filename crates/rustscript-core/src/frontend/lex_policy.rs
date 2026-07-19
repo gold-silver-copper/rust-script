@@ -217,7 +217,10 @@ mod tests {
             "fn main(){0x1_i64;}",
             "fn main(){\"x\";}",
         ] {
-            assert!(validate(source, ParseLimits::default()).is_err(), "{source}");
+            assert!(
+                validate(source, ParseLimits::default()).is_err(),
+                "{source}"
+            );
         }
     }
 
@@ -265,7 +268,10 @@ mod tests {
     fn rejects_non_profile_ascii_whitespace() {
         for whitespace in ['\u{000b}', '\u{000c}'] {
             let source = format!("fn{whitespace}main() {{}}");
-            assert!(validate(&source, ParseLimits::default()).is_err(), "{source:?}");
+            assert!(
+                validate(&source, ParseLimits::default()).is_err(),
+                "{source:?}"
+            );
         }
     }
 }

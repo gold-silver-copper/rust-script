@@ -6,6 +6,72 @@ use ra_ap_syntax::{AstNode, SyntaxKind, ast};
 
 use crate::{Diagnostic, ParseLimits, Phase};
 
+/// Identifiers the profile refuses in binding, parameter, and function-name
+/// positions; `main` is allowed only as the entry-point function name.
+const RESERVED: &[&str] = &[
+    "_",
+    "as",
+    "async",
+    "await",
+    "break",
+    "const",
+    "continue",
+    "crate",
+    "dyn",
+    "else",
+    "enum",
+    "extern",
+    "false",
+    "fn",
+    "for",
+    "if",
+    "impl",
+    "in",
+    "let",
+    "loop",
+    "match",
+    "mod",
+    "move",
+    "mut",
+    "pub",
+    "ref",
+    "return",
+    "self",
+    "Self",
+    "static",
+    "struct",
+    "super",
+    "trait",
+    "true",
+    "type",
+    "unsafe",
+    "use",
+    "where",
+    "while",
+    "abstract",
+    "become",
+    "box",
+    "do",
+    "final",
+    "gen",
+    "macro",
+    "override",
+    "priv",
+    "try",
+    "typeof",
+    "unsized",
+    "virtual",
+    "yield",
+    "macro_rules",
+    "raw",
+    "safe",
+    "union",
+    "i64",
+    "bool",
+    "println",
+    "main",
+];
+
 pub(super) fn validate(file: &ast::SourceFile, limits: ParseLimits) -> Result<(), Diagnostic> {
     let mut functions = 0usize;
     for item in file.items() {
@@ -22,7 +88,10 @@ pub(super) fn validate(file: &ast::SourceFile, limits: ParseLimits) -> Result<()
     validate_descendants(file.syntax(), limits)
 }
 
-fn validate_descendants(root: &ra_ap_syntax::SyntaxNode, limits: ParseLimits) -> Result<(), Diagnostic> {
+fn validate_descendants(
+    root: &ra_ap_syntax::SyntaxNode,
+    limits: ParseLimits,
+) -> Result<(), Diagnostic> {
     // rust-analyzer does not expose empty statements as an `ast::Stmt` variant.
     // The subset has no empty statement, so reject semicolons not owned by one
     // of the two statement nodes that can legally contain them.
@@ -119,6 +188,9 @@ fn validate_descendants(root: &ra_ap_syntax::SyntaxNode, limits: ParseLimits) ->
         {
             return Err(unsupported("pattern", pat.syntax()));
         }
+        if let Some(name) = ast::Name::cast(node.clone()) {
+            validate_name(&name)?;
+        }
         if ast::Attr::can_cast(node.kind()) {
             return Err(unsupported("attribute", &node));
         }
@@ -196,6 +268,13 @@ fn validate_expression_policy(expression: &ast::Expr) -> Result<(), Diagnostic> 
 }
 
 fn validate_binary(binary: &ast::BinExpr) -> Result<(), Diagnostic> {
+    if matches!(binary.op_kind(), Some(BinaryOp::CmpOp(_))) && has_comparison_operand(binary) {
+        return Err(Diagnostic::new(
+            Phase::Parse,
+            "comparison chains are unsupported",
+            Some(crate::diagnostic::span(binary.syntax().text_range())),
+        ));
+    }
     let supported = match binary.op_kind() {
         Some(BinaryOp::Assignment { op: None }) => binary
             .lhs()
@@ -214,6 +293,39 @@ fn validate_binary(binary: &ast::BinExpr) -> Result<(), Diagnostic> {
     } else {
         Err(unsupported("binary operator", binary.syntax()))
     }
+}
+
+// One nesting level suffices: a parenthesized sub-comparison is no longer a
+// chain, and unparenthesized deeper chains surface as their own `BinExpr` while
+// any surviving comparison-of-comparison fails later on operand types.
+fn has_comparison_operand(binary: &ast::BinExpr) -> bool {
+    [binary.lhs(), binary.rhs()]
+        .into_iter()
+        .flatten()
+        .any(|expr| {
+            matches!(
+                expr,
+                ast::Expr::BinExpr(ref inner)
+                    if matches!(inner.op_kind(), Some(BinaryOp::CmpOp(_)))
+            )
+        })
+}
+
+fn validate_name(name: &ast::Name) -> Result<(), Diagnostic> {
+    let text = name.text();
+    let is_entry_point_name = text == "main"
+        && name
+            .syntax()
+            .parent()
+            .is_some_and(|parent| ast::Fn::can_cast(parent.kind()));
+    if !is_entry_point_name && RESERVED.contains(&text.as_str()) {
+        return Err(Diagnostic::new(
+            Phase::Parse,
+            "reserved identifier",
+            Some(crate::diagnostic::span(name.syntax().text_range())),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_statement_position(expression: &ast::Expr) -> Result<(), Diagnostic> {

@@ -238,7 +238,10 @@ fn parse_wrapper(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, D
     parse_wrapper_uncontained(source, limits)
 }
 
-fn parse_wrapper_uncontained(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
+fn parse_wrapper_uncontained(
+    source: &str,
+    limits: ParseLimits,
+) -> Result<ast::SourceFile, Diagnostic> {
     let parsed = SourceFile::parse(source, Edition::Edition2024);
     if !parsed.errors().is_empty() {
         return Err(Diagnostic::new(

@@ -10,6 +10,39 @@ const GENERATED_RANGE: TextRange = TextRange::empty(TextSize::new(0));
 const MAX_EXPRESSION_DEPTH: usize = 5;
 const MAX_OUTPUT_LINES: usize = 64;
 
+/// Structural bounds enforced by [`generate_checked_program`].
+///
+/// Exported so harness metadata is derived from the real generator limits
+/// instead of hand-maintained prose that can drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GeneratorLimits {
+    /// Maximum number of helper functions besides `main`.
+    pub maximum_helpers: usize,
+    /// Maximum number of parameters per helper function.
+    pub maximum_parameters: usize,
+    /// Maximum number of statements in one generated block.
+    pub maximum_statements: usize,
+    /// Maximum expression nesting depth.
+    pub maximum_expression_depth: usize,
+    /// Maximum loop nesting depth.
+    pub maximum_loop_depth: usize,
+    /// Maximum iteration bound for generated counter loops.
+    pub maximum_loop_bound: usize,
+    /// Maximum interpreter output lines accepted by the suitability filter.
+    pub maximum_output_lines: usize,
+}
+
+/// The bounds used by [`generate_checked_program`].
+pub const GENERATOR_LIMITS: GeneratorLimits = GeneratorLimits {
+    maximum_helpers: 4,
+    maximum_parameters: 3,
+    maximum_statements: 8,
+    maximum_expression_depth: MAX_EXPRESSION_DEPTH,
+    maximum_loop_depth: 2,
+    maximum_loop_bound: 8,
+    maximum_output_lines: MAX_OUTPUT_LINES,
+};
+
 /// Build a bounded, typed, terminating checked program from a decision stream.
 ///
 /// This is deliberately a syntax-neutral checked-IR generator rather than a
@@ -255,7 +288,7 @@ impl<'a> Generator<'a> {
     }
 
     fn program(mut self) -> CheckedProgram {
-        let helper_count = self.choose(5);
+        let helper_count = self.choose(GENERATOR_LIMITS.maximum_helpers + 1);
         let mut functions = Vec::with_capacity(helper_count + 1);
         for id in 0..helper_count {
             functions.push(self.helper(id, &functions));
@@ -266,7 +299,7 @@ impl<'a> Generator<'a> {
     }
 
     fn helper(&mut self, id: usize, earlier: &[Function]) -> Function {
-        let parameter_count = self.choose(4);
+        let parameter_count = self.choose(GENERATOR_LIMITS.maximum_parameters + 1);
         let parameters: Vec<_> = (0..parameter_count)
             .map(|parameter| Parameter {
                 id: parameter,
@@ -293,7 +326,7 @@ impl<'a> Generator<'a> {
             .collect();
         let mut locals = locals;
         let mut next_local = parameter_count;
-        let statement_budget = self.choose(9);
+        let statement_budget = self.choose(GENERATOR_LIMITS.maximum_statements + 1);
         let statements = self.statements(
             &mut locals,
             earlier,
@@ -326,7 +359,7 @@ impl<'a> Generator<'a> {
 
     fn main(&mut self, helpers: &[Function]) -> Function {
         let initial = self.small_i64();
-        let iterations = self.choose(9) as i64;
+        let iterations = self.choose(GENERATOR_LIMITS.maximum_loop_bound + 1) as i64;
         let mut statements = vec![Statement::Let {
             id: 0,
             name: SmolStr::new("x0"),
@@ -421,7 +454,15 @@ impl<'a> Generator<'a> {
             .enumerate()
             .find(|(_, function)| function.return_type == Type::Unit)
         {
-            statements.push(Statement::Expression(self.call(id, &helpers[id])));
+            let context = GenerationContext {
+                locals: &locals,
+                functions: helpers,
+                expected_type: Type::Unit,
+                expression_depth: 0,
+                statement_budget: 0,
+                loop_depth: 0,
+            };
+            statements.push(Statement::Expression(self.call(id, &helpers[id], context)));
         }
 
         Function {
@@ -461,11 +502,21 @@ impl<'a> Generator<'a> {
                 statement_budget: remaining_slots.saturating_sub(1),
                 loop_depth,
             };
-            let choices = if loop_depth < 2 && remaining_slots >= 2 {
-                5
-            } else {
-                4
-            };
+            // Inside a loop, occasionally emit a conditional early exit.
+            // `break` only ever exits the enclosing canonical loop early, so
+            // termination is unaffected.
+            if loop_depth > 0 && self.choose(8) == 0 {
+                let condition = self.expression(context.deeper(Type::Bool));
+                statements.push(conditional_break(condition));
+                remaining_slots = remaining_slots.saturating_sub(1);
+                continue;
+            }
+            let choices =
+                if loop_depth < GENERATOR_LIMITS.maximum_loop_depth && remaining_slots >= 2 {
+                    5
+                } else {
+                    4
+                };
             match self.choose(choices) {
                 0 => {
                     let ty = if self.choose(2) == 0 {
@@ -553,7 +604,7 @@ impl<'a> Generator<'a> {
                                 strict: true,
                             }),
                             local(counter, Type::I64),
-                            integer(self.choose(9) as i64),
+                            integer(self.choose(GENERATOR_LIMITS.maximum_loop_bound + 1) as i64),
                             Type::Bool,
                         ),
                         body: Block {
@@ -595,13 +646,11 @@ impl<'a> Generator<'a> {
                 |binding| local(binding.id, binding.ty),
             ),
             2 => match self.matching_function(context.functions, Type::I64) {
-                Some((id, function)) => self.call(id, function),
+                Some((id, function)) => self.call(id, function, context),
                 None => integer(self.small_i64()),
             },
             3 => {
                 let next = context.deeper(Type::I64);
-                let left = self.expression(next);
-                let right = integer((self.choose(9) + 1) as i64);
                 let op = match self.choose(5) {
                     0 => ArithOp::Add,
                     1 => ArithOp::Sub,
@@ -609,11 +658,33 @@ impl<'a> Generator<'a> {
                     3 => ArithOp::Div,
                     _ => ArithOp::Rem,
                 };
+                let left = self.expression(next);
+                let right = match op {
+                    // The subset prefers provably nonzero literal denominators.
+                    ArithOp::Div | ArithOp::Rem => integer(self.signed_magnitude(1000)),
+                    // Keep multiplication operands smaller than addition
+                    // operands so the interpreter suitability filter rarely
+                    // rejects the candidate for an overflowing product.
+                    ArithOp::Mul => {
+                        if self.choose(2) == 0 {
+                            integer(self.signed_magnitude(12))
+                        } else {
+                            self.expression(next)
+                        }
+                    }
+                    _ => {
+                        if self.choose(2) == 0 {
+                            integer(self.signed_magnitude(1000))
+                        } else {
+                            self.expression(next)
+                        }
+                    }
+                };
                 binary(BinaryOp::ArithOp(op), left, right, Type::I64)
             }
             4 => unary(
                 UnaryOp::Neg,
-                integer((self.choose(20) + 1) as i64),
+                integer((self.choose(1000) + 1) as i64),
                 Type::I64,
             ),
             5 => self.if_expression(context, Type::I64),
@@ -634,12 +705,13 @@ impl<'a> Generator<'a> {
                 |binding| local(binding.id, binding.ty),
             ),
             2 => match self.matching_function(context.functions, Type::Bool) {
-                Some((id, function)) => self.call(id, function),
+                Some((id, function)) => self.call(id, function, context),
                 None => boolean(self.choose(2) == 0),
             },
             3 => {
-                let lhs = integer(self.small_i64());
-                let rhs = integer(self.small_i64());
+                let next = context.deeper(Type::I64);
+                let lhs = self.expression(next);
+                let rhs = self.expression(next);
                 let op = if self.choose(2) == 0 {
                     CmpOp::Ord {
                         ordering: Ordering::Less,
@@ -681,7 +753,7 @@ impl<'a> Generator<'a> {
             && self.choose(3) == 0
             && let Some((id, function)) = self.matching_function(context.functions, Type::Unit)
         {
-            return self.call(id, function);
+            return self.call(id, function, context);
         }
         if !depth_limited && self.choose(3) == 0 {
             return block_expression(self.expression(context.deeper(Type::Unit)), Type::Unit);
@@ -735,11 +807,16 @@ impl<'a> Generator<'a> {
         (!matches.is_empty()).then(|| matches[self.choose(matches.len())])
     }
 
-    fn call(&mut self, id: usize, function: &Function) -> Expression {
+    fn call(
+        &mut self,
+        id: usize,
+        function: &Function,
+        context: GenerationContext<'_>,
+    ) -> Expression {
         let arguments = function
             .parameters
             .iter()
-            .map(|parameter| self.leaf(parameter.ty))
+            .map(|parameter| self.argument(parameter.ty, context))
             .collect();
         Expression {
             kind: ExpressionKind::Call {
@@ -748,6 +825,19 @@ impl<'a> Generator<'a> {
             },
             ty: function.return_type,
             span: GENERATED_RANGE,
+        }
+    }
+
+    fn argument(&mut self, ty: Type, context: GenerationContext<'_>) -> Expression {
+        if context.expression_depth >= MAX_EXPRESSION_DEPTH {
+            return self.leaf(ty);
+        }
+        match self.choose(4) {
+            0 => self.leaf(ty),
+            1 => self
+                .matching_local(context.locals, ty)
+                .map_or_else(|| self.leaf(ty), |binding| local(binding.id, binding.ty)),
+            _ => self.expression(context.deeper(ty)),
         }
     }
 
@@ -760,7 +850,16 @@ impl<'a> Generator<'a> {
     }
 
     fn small_i64(&mut self) -> i64 {
-        self.choose(41) as i64 - 20
+        self.choose(2001) as i64 - 1000
+    }
+
+    fn signed_magnitude(&mut self, bound: usize) -> i64 {
+        let magnitude = (self.choose(bound) + 1) as i64;
+        if self.choose(4) == 0 {
+            -magnitude
+        } else {
+            magnitude
+        }
     }
 
     fn choose(&mut self, upper: usize) -> usize {
@@ -789,15 +888,43 @@ impl GenerationContext<'_> {
 }
 
 fn integer(value: i64) -> Expression {
-    if value < 0 {
+    if let Some(negated) = value.checked_neg().filter(|_| value < 0) {
         unary(
             UnaryOp::Neg,
-            value_expression(Value::I64(-value), Type::I64),
+            value_expression(Value::I64(negated), Type::I64),
+            Type::I64,
+        )
+    } else if value < 0 {
+        // i64::MIN has no negatable literal; spell it as `-i64::MAX - 1_i64`.
+        binary(
+            BinaryOp::ArithOp(ArithOp::Sub),
+            integer(value + 1),
+            value_expression(Value::I64(1), Type::I64),
             Type::I64,
         )
     } else {
         value_expression(Value::I64(value), Type::I64)
     }
+}
+
+/// A unit-typed `if <condition> { break; } else {};` statement.
+///
+/// Both branches are explicit and unit-typed so the statement stays inside
+/// the subset syntax and round-trips through the canonical emitter.
+fn conditional_break(condition: Expression) -> Statement {
+    Statement::Expression(Expression {
+        kind: ExpressionKind::If {
+            condition: Box::new(condition),
+            then_branch: Block {
+                statements: vec![Statement::Break(GENERATED_RANGE)],
+                tail: Some(Box::new(unit())),
+                span: GENERATED_RANGE,
+            },
+            else_branch: tail_block(unit()),
+        },
+        ty: Type::Unit,
+        span: GENERATED_RANGE,
+    })
 }
 
 fn boolean(value: bool) -> Expression {
@@ -1298,7 +1425,7 @@ impl StructuralExpressionMatch for Expression {
 #[cfg(test)]
 mod tests {
     use crate::checked_ir::{Block, CheckedProgram, Expression, ExpressionKind, Statement};
-    use crate::{ParseLimits, Limits, check_source, format, run};
+    use crate::{Limits, ParseLimits, check_source, format, run};
     use proptest::prelude::*;
 
     #[test]
@@ -1322,45 +1449,34 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_helper_chain_uses_the_safe_suitability_fallback() {
-        let mut decisions = [0_u64; 160];
-        decisions[0] = 4;
-        for helper in 0..4 {
-            let base = 1 + helper * 20;
-            decisions[base] = 0;
-            decisions[base + 1] = 0;
-            decisions[base + 2] = 0;
-            for decision in &mut decisions[base + 3..=base + 7] {
-                *decision = 3;
+    fn overflowing_raw_candidates_use_the_safe_suitability_fallback() {
+        // Decision stream for a helper-free `main` whose final i64 print is a
+        // full binary tree of multiplications over 1000-magnitude literals,
+        // which overflows during interpretation.
+        fn overflowing_expression(decisions: &mut Vec<u64>, depth: usize) {
+            if depth >= super::MAX_EXPRESSION_DEPTH {
+                decisions.push(0); // literal leaf
+                decisions.push(2000); // small_i64 upper bound: 1000
+                return;
             }
-            if helper == 0 {
-                decisions[base + 8] = 0;
-                decisions[base + 9] = 40;
-            } else {
-                decisions[base + 8] = 2;
-                decisions[base + 9] = (helper - 1) as u64;
-            }
-            for index in 0..5 {
-                decisions[base + 10 + index * 2] = 8;
-                decisions[base + 11 + index * 2] = 2;
-            }
+            decisions.push(3); // arithmetic arm
+            decisions.push(2); // multiplication
+            overflowing_expression(decisions, depth + 1); // left operand
+            decisions.push(1); // non-literal right operand
+            overflowing_expression(decisions, depth + 1); // right operand
         }
-        decisions[81] = 40;
-        decisions[82] = 0;
-        decisions[84] = 1;
-        for decision in &mut decisions[85..=89] {
-            *decision = 3;
-        }
-        decisions[90] = 2;
-        decisions[91] = 3;
-        for index in 0..5 {
-            decisions[92 + index * 2] = 8;
-            decisions[93 + index * 2] = 2;
-        }
+        let mut decisions = vec![
+            0, // no helpers
+            0, // main initial value
+            0, // zero loop iterations
+            0, // boolean initializer
+            0, // include the loop print
+        ];
+        overflowing_expression(&mut decisions, 0);
 
         let raw = super::Generator::new(&decisions).program();
-        let error = run(&raw, Limits::default())
-            .expect_err("constructed raw candidate must overflow");
+        let error =
+            run(&raw, Limits::default()).expect_err("constructed raw candidate must overflow");
         assert_eq!(error.diagnostic.message, "integer arithmetic overflow");
 
         let filtered = super::generate_checked_program(&decisions);

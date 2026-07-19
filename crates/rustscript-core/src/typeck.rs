@@ -20,54 +20,73 @@ struct Signature {
     syntax: ast::Fn,
 }
 
-pub(crate) fn check(parsed: &ParsedProgram) -> Result<CheckedProgram, Diagnostic> {
-    let signatures = collect_signatures(parsed)?;
+pub(crate) fn check(parsed: &ParsedProgram) -> Result<CheckedProgram, Vec<Diagnostic>> {
+    let signatures = collect_signatures(parsed).map_err(|error| vec![error])?;
     let function_names: HashMap<_, _> = signatures
         .iter()
         .enumerate()
         .map(|(id, signature)| (signature.name.clone(), id))
         .collect();
     let mut functions = Vec::with_capacity(signatures.len());
+    let mut diagnostics = Vec::new();
     let mut main = None;
 
     for (id, signature) in signatures.iter().enumerate() {
         if signature.name == "main" {
             main = Some(id);
         }
-        for parameter in &signature.parameters {
-            if function_names.contains_key(&parameter.name) {
-                return Err(type_error(
-                    "parameter name collides with a function",
-                    signature.syntax.syntax(),
-                ));
-            }
+        match check_function(signature, &signatures, &function_names, parsed.limits()) {
+            Ok(function) => functions.push(function),
+            Err(diagnostic) => diagnostics.push(diagnostic),
         }
-        let body = signature
-            .syntax
-            .body()
-            .ok_or_else(|| type_error("function body is required", signature.syntax.syntax()))?;
-        let mut checker =
-            BodyChecker::new(signature, &signatures, &function_names, parsed.limits());
-        let checked = checker.check_block(&body)?;
-        if checked.ty != signature.return_type && !checked.is_never {
-            return Err(type_error(
-                "function body does not produce its declared return type",
-                body.syntax(),
-            ));
-        }
-        functions.push(Function {
-            name: signature.name.clone(),
-            parameters: signature.parameters.clone(),
-            return_type: signature.return_type,
-            explicit_return: signature.explicit_return,
-            local_count: checker.next_local,
-            body: checked.block,
-        });
+    }
+    if !diagnostics.is_empty() {
+        return Err(diagnostics);
     }
     let main = main.ok_or_else(|| {
-        Diagnostic::new(Phase::Type, "exactly one main function is required", None)
+        vec![Diagnostic::new(
+            Phase::Type,
+            "exactly one main function is required",
+            None,
+        )]
     })?;
     Ok(CheckedProgram { functions, main })
+}
+
+fn check_function(
+    signature: &Signature,
+    signatures: &[Signature],
+    function_names: &HashMap<SmolStr, FunctionId>,
+    limits: ParseLimits,
+) -> Result<Function, Diagnostic> {
+    for parameter in &signature.parameters {
+        if function_names.contains_key(&parameter.name) {
+            return Err(type_error(
+                "parameter name collides with a function",
+                signature.syntax.syntax(),
+            ));
+        }
+    }
+    let body = signature
+        .syntax
+        .body()
+        .ok_or_else(|| type_error("function body is required", signature.syntax.syntax()))?;
+    let mut checker = BodyChecker::new(signature, signatures, function_names, limits);
+    let checked = checker.check_block(&body)?;
+    if checked.ty != signature.return_type && !checked.is_never {
+        return Err(type_error(
+            "function body does not produce its declared return type",
+            body.syntax(),
+        ));
+    }
+    Ok(Function {
+        name: signature.name.clone(),
+        parameters: signature.parameters.clone(),
+        return_type: signature.return_type,
+        explicit_return: signature.explicit_return,
+        local_count: checker.next_local,
+        body: checked.block,
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -300,7 +319,6 @@ impl<'a> BodyChecker<'a> {
             .name()
             .ok_or_else(|| type_error("binding name is required", pattern.syntax()))?;
         let name = SmolStr::new(name_node.text());
-        validate_binding_name(&name, name_node.syntax())?;
         if self.function_names.contains_key(&name) {
             return Err(type_error(
                 "local name collides with a function",
@@ -578,12 +596,6 @@ impl<'a> BodyChecker<'a> {
                 binary.syntax(),
             ));
         }
-        if matches!(op, BinaryOp::CmpOp(_)) && has_comparison_operand(&binary) {
-            return Err(type_error(
-                "comparison chains are unsupported",
-                binary.syntax(),
-            ));
-        }
         let lhs = self.check_expression(
             binary
                 .lhs()
@@ -815,19 +827,6 @@ fn map_block_ranges(
     }
 }
 
-fn has_comparison_operand(binary: &ast::BinExpr) -> bool {
-    [binary.lhs(), binary.rhs()]
-        .into_iter()
-        .flatten()
-        .any(|expr| {
-            matches!(
-                expr,
-                ast::Expr::BinExpr(ref inner)
-                    if matches!(inner.op_kind(), Some(BinaryOp::CmpOp(_)))
-            )
-        })
-}
-
 fn bare_path_name(path: &ast::PathExpr) -> Option<SmolStr> {
     let path = path.path()?;
     if path.qualifier().is_some() || path.coloncolon_token().is_some() {
@@ -852,7 +851,6 @@ fn collect_signatures(parsed: &ParsedProgram) -> Result<Vec<Signature>, Diagnost
             .name()
             .ok_or_else(|| type_error("function name is required", function.syntax()))?;
         let name = SmolStr::new(name_node.text());
-        validate_function_name(&name, &function)?;
         if names.insert(name.clone(), signatures.len()).is_some() {
             return Err(type_error("duplicate function name", name_node.syntax()));
         }
@@ -886,7 +884,6 @@ fn collect_signatures(parsed: &ParsedProgram) -> Result<Vec<Signature>, Diagnost
                     .name()
                     .ok_or_else(|| type_error("parameter name is required", pattern.syntax()))?;
                 let parameter_name = SmolStr::new(parameter_name_node.text());
-                validate_binding_name(&parameter_name, parameter_name_node.syntax())?;
                 if !parameter_names.insert(parameter_name.clone()) {
                     return Err(type_error(
                         "duplicate parameter name",
@@ -969,83 +966,6 @@ fn parse_type(
     }
 }
 
-fn validate_function_name(name: &str, function: &ast::Fn) -> Result<(), Diagnostic> {
-    if name == "main" {
-        return Ok(());
-    }
-    validate_binding_name(name, function.syntax())
-}
-
-fn validate_binding_name(name: &str, node: &ra_ap_syntax::SyntaxNode) -> Result<(), Diagnostic> {
-    const RESERVED: &[&str] = &[
-        "_",
-        "as",
-        "async",
-        "await",
-        "break",
-        "const",
-        "continue",
-        "crate",
-        "dyn",
-        "else",
-        "enum",
-        "extern",
-        "false",
-        "fn",
-        "for",
-        "if",
-        "impl",
-        "in",
-        "let",
-        "loop",
-        "match",
-        "mod",
-        "move",
-        "mut",
-        "pub",
-        "ref",
-        "return",
-        "self",
-        "Self",
-        "static",
-        "struct",
-        "super",
-        "trait",
-        "true",
-        "type",
-        "unsafe",
-        "use",
-        "where",
-        "while",
-        "abstract",
-        "become",
-        "box",
-        "do",
-        "final",
-        "gen",
-        "macro",
-        "override",
-        "priv",
-        "try",
-        "typeof",
-        "unsized",
-        "virtual",
-        "yield",
-        "macro_rules",
-        "raw",
-        "safe",
-        "union",
-        "i64",
-        "bool",
-        "println",
-        "main",
-    ];
-    if RESERVED.contains(&name) {
-        return Err(type_error("reserved identifier", node));
-    }
-    Ok(())
-}
-
 fn type_error(message: &str, node: &ra_ap_syntax::SyntaxNode) -> Diagnostic {
     Diagnostic::new(
         Phase::Type,
@@ -1065,7 +985,13 @@ mod tests {
 
     #[test]
     fn collects_forward_and_recursive_signatures() {
-        assert!(check_source("fn a(x: i64) -> i64 {} fn main() {}", ParseLimits::default()).is_err());
+        assert!(
+            check_source(
+                "fn a(x: i64) -> i64 {} fn main() {}",
+                ParseLimits::default()
+            )
+            .is_err()
+        );
         assert!(check_source("fn a(x: i64) {} fn main() {}", ParseLimits::default()).is_ok());
     }
 
@@ -1080,7 +1006,10 @@ mod tests {
             "fn f(main: i64) {} fn main() {}",
             "fn f(x: u64) {} fn main() {}",
         ] {
-            assert!(check_source(source, ParseLimits::default()).is_err(), "{source}");
+            assert!(
+                check_source(source, ParseLimits::default()).is_err(),
+                "{source}"
+            );
         }
     }
 
@@ -1114,7 +1043,10 @@ fn main() {
             "fn main() { if true { 1_i64 } else { false }; }",
             "fn main() { let x = 1_i64 < 2_i64 < 3_i64; }",
         ] {
-            assert!(check_source(source, ParseLimits::default()).is_err(), "{source}");
+            assert!(
+                check_source(source, ParseLimits::default()).is_err(),
+                "{source}"
+            );
         }
     }
 }

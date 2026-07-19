@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use rustscript_core::{ParseLimits, Limits, check_source, run};
+use rustscript_core::{Limits, ParseLimits, check_source, run};
 
 const EXAMPLES: &[(&str, &str, &[u8])] = &[
     (
