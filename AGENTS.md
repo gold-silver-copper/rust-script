@@ -52,6 +52,14 @@ Out of scope without explicit human direction: expanding the language subset
 adding dependencies, or relaxing any limit. Propose these in the backlog's
 "Needs human decision" section instead of implementing them.
 
+**Subset growth is governed by the HIR-reuse gate**
+([`docs/hir-reuse-gate.md`](docs/hir-reuse-gate.md)). Value-semantics features
+(more scalars, `for`, `match`, compound assignment, value tuples/arrays) may be
+added on the hand-rolled checker. References/borrows, generics, and traits may
+**not** be implemented until that gate is re-run and passes — do not grow a
+hand-written borrow checker or trait solver beside rust-analyzer. Re-run the
+gate on every `ra_ap_*` pin bump.
+
 ## Hard invariants (never violate)
 
 - The one-way compatibility contract and exact-stdout comparison

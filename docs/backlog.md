@@ -46,13 +46,33 @@ Do not delete this file's structure.
       added a "Dependency-list deviations" section covering both the
       `wait-timeout` removal and the omitted redundant direct `serde`.
 
+## HIR-reuse gate (open items before the borrow/generics frontier)
+
+See [`docs/hir-reuse-gate.md`](hir-reuse-gate.md). The 2026-07-19 re-run proved
+single-file HIR inference works and compiles for wasm; these remain before the
+gate could justify embedding at the borrow/generics threshold:
+
+- [ ] Prove **browser execution** of the inference path (headless wasm-bindgen
+      run, not just a compile) — now the decisive open criterion.
+- [ ] Find a **production (non-test-fixture) database path**: wire `Semantics`
+      onto `ra_ap_ide::Analysis::from_single_file`'s database, replacing
+      `ra_ap_test_fixture::RootDatabase::with_single_file`.
+- [ ] Integrate and measure **resource-bounding / determinism** of HIR
+      inference under adversarial input.
+- [ ] Measure **bundle size / build-time** cost (~225-package wasm graph) for
+      the browser engine.
+- [ ] Assess **diagnostic sufficiency** — can HIR facts enforce every subset
+      rule with good spans without a second checker?
+
 ## Needs human decision (do not implement unilaterally)
 
 - Multi-error reporting at lex/parse: the spec's
   `parse -> Result<_, Diagnostic>` signature forces first-error-only.
   Aggregating requires a public API change.
-- Any language-subset extension (more types, `for`, strings, etc.) —
-  a spec change, not an improvement.
+- Any language-subset extension — now governed by the HIR-reuse gate
+  (see above and `docs/hir-reuse-gate.md`). Value-semantics features are
+  implementable on the hand-rolled checker once a human picks the target
+  profile; borrow/generics/traits are gated on completing the gate.
 - Batched rustc invocations in the differential runner (spec allows it
   only after correctness is established; decide if the compile-time win
   matters).

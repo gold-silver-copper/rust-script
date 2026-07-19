@@ -31,6 +31,13 @@ original token-tree expression range before checked IR is retained.
 
 ## Compiler-semantics reuse gate
 
+> **Superseded in part (2026-07-19).** A deeper re-run overturned this
+> section's central "no small public constructor exists" finding: single-file
+> HIR type inference *does* work through public APIs, and the path compiles for
+> wasm. The decision, the reproducible experiment, and the coupling to
+> subset growth now live in [`hir-reuse-gate.md`](hir-reuse-gate.md). The
+> analysis below is retained as the original evidence.
+
 The matching rust-analyzer semantic stack was evaluated on 2026-07-18 with an
 ephemeral crate containing exact `=0.0.342` dependencies on
 `ra_ap_base_db`, `ra_ap_hir`, and `ra_ap_hir_ty`:
