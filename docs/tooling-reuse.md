@@ -101,3 +101,16 @@ is a documented test-only exception: `wasm-bindgen` expands the asynchronous
 imported JavaScript test through that crate, while no production adapter path
 uses it. Revalidate the cfg in the dependency source and rerun the browser/Node
 tests whenever the exact rust-analyzer pins change.
+
+## Dependency-list deviations
+
+Two documented departures from the spec's package-boundary dependency list:
+
+- `wait-timeout` was removed from `rustscript-difftest`; its Unix SIGCHLD
+  coordination is process-global (see `docs/regression-corpus.md`). The oracle
+  serializes the spawn/wait/cleanup/drain boundary and polls `try_wait`
+  instead.
+- The spec listed a direct `serde` dependency for `rustscript-difftest`, but
+  the crate needs only `serde_json` for artifact metadata serialization, so the
+  redundant direct `serde` dependency is omitted. `serde` still arrives
+  transitively through `rustscript-core`'s `serde` feature.

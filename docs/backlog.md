@@ -27,17 +27,19 @@ Do not delete this file's structure.
 
 - [ ] Chrome/chromedriver run in the CI wasm job alongside Firefox
       (worker `error`-event semantics are the engine-variant risk).
-- [ ] `--artifacts PATH` flag for `rustscript-difftest` (root is currently
-      hardcoded cwd-relative `artifacts/differential`).
+- [x] `--artifacts PATH` flag for `rustscript-difftest`. Done 2026-07-19:
+      overrides the default cwd-relative `artifacts/differential` root; unit
+      tests plus an end-to-end `--keep-all` write to a custom dir.
 - [ ] Oracle reader-drain timeout currently surfaces as a hard
       `NativeFailure`; consider returning captured bytes with the existing
       `OutputCaptureTruncated` classification instead.
 - [ ] Windows: `terminate_process_tree` kills only the direct child
       (documented). Real fix needs Job Objects; needs a Windows CI runner
       to validate — otherwise leave documented.
-- [ ] Note the dropped spec-listed `serde` dependency of
-      `rustscript-difftest` in `docs/tooling-reuse.md` (removed as unused;
-      unlike `wait-timeout`, the deviation is currently undocumented).
+- [x] Note the dropped spec-listed `serde` dependency of
+      `rustscript-difftest` in `docs/tooling-reuse.md`. Done 2026-07-19:
+      added a "Dependency-list deviations" section covering both the
+      `wait-timeout` removal and the omitted redundant direct `serde`.
 
 ## Needs human decision (do not implement unilaterally)
 

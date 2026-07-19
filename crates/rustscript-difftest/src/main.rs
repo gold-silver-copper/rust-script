@@ -15,6 +15,7 @@ struct Arguments {
     case: Option<usize>,
     replay: Option<PathBuf>,
     rustc: Option<PathBuf>,
+    artifacts: PathBuf,
     keep_all: bool,
 }
 
@@ -30,7 +31,7 @@ fn main() -> ExitCode {
 
 fn run(arguments: Arguments) -> Result<(), String> {
     let oracle = RustcOracle::discover(arguments.rustc);
-    let artifact_root = PathBuf::from("artifacts/differential");
+    let artifact_root = arguments.artifacts;
     if let Some(path) = arguments.replay {
         let bytes = read_bounded(
             &path,
@@ -119,6 +120,7 @@ fn parse_arguments(arguments: Vec<std::ffi::OsString>) -> Result<Arguments, Stri
         case: None,
         replay: None,
         rustc: None,
+        artifacts: PathBuf::from("artifacts/differential"),
         keep_all: false,
     };
     let mut arguments = arguments.into_iter();
@@ -143,6 +145,13 @@ fn parse_arguments(arguments: Vec<std::ffi::OsString>) -> Result<Arguments, Stri
                         .next()
                         .ok_or_else(|| "--rustc requires a path".to_owned())?,
                 ))
+            }
+            "--artifacts" => {
+                parsed.artifacts = PathBuf::from(
+                    arguments
+                        .next()
+                        .ok_or_else(|| "--artifacts requires a path".to_owned())?,
+                )
             }
             "--keep-all" => parsed.keep_all = true,
             _ => return Err(format!("unknown argument `{argument}`")),
@@ -181,5 +190,23 @@ mod tests {
         assert_eq!(arguments.seed, 7);
         assert_eq!(arguments.case, Some(3));
         assert!(arguments.keep_all);
+        assert_eq!(arguments.artifacts, PathBuf::from("artifacts/differential"));
+    }
+
+    #[test]
+    fn artifacts_root_defaults_and_overrides() {
+        let default = parse_arguments(Vec::new()).unwrap();
+        assert_eq!(default.artifacts, PathBuf::from("artifacts/differential"));
+
+        let overridden = parse_arguments(
+            ["--artifacts", "/tmp/diff-out"]
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(overridden.artifacts, PathBuf::from("/tmp/diff-out"));
+
+        assert!(parse_arguments(vec!["--artifacts".into()]).is_err());
     }
 }

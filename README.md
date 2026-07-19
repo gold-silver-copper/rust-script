@@ -223,6 +223,7 @@ cargo run -p rustscript-difftest -- --seed 12345 --case 87
 cargo run -p rustscript-difftest -- --replay path/to/failure.rs
 cargo run -p rustscript-difftest -- --rustc /path/to/rustc
 cargo run -p rustscript-difftest -- --seed 1 --cases 10 --keep-all
+cargo run -p rustscript-difftest -- --artifacts /tmp/diff-out --seed 1 --cases 10
 ```
 
 Generated helpers form a DAG, expressions are generated from expected types,
@@ -232,7 +233,8 @@ steps/output, rustc acceptance, native success, empty native stderr, and exact
 stdout equality.
 
 Failures use non-overwriting `artifacts/differential/seed-N-case-M/`
-directories, created relative to the runner's working directory, containing original/canonical/minimized source, rust-analyzer
+directories under the runner's working directory (override the root with
+`--artifacts PATH`), containing original/canonical/minimized source, rust-analyzer
 syntax, metadata/reproduction commands, and every interpreter/compiler/native
 stream. The reducer emits type-preserving checked-IR candidates and keeps a
 smaller candidate only when replay preserves the original category.
