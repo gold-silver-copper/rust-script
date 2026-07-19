@@ -5,8 +5,8 @@ use std::process::ExitCode;
 use std::{io::Read, path::Path};
 
 use rustscript_difftest::{
-    RustcOracle, minimize_failure, replay_source, run_case, write_failure_artifact_with_oracle,
-    write_success_artifact,
+    ReplayError, RustcOracle, minimize_failure, replay_source, run_case,
+    write_failure_artifact_with_oracle, write_success_artifact,
 };
 
 struct Arguments {
@@ -32,8 +32,11 @@ fn run(arguments: Arguments) -> Result<(), String> {
     let oracle = RustcOracle::discover(arguments.rustc);
     let artifact_root = PathBuf::from("artifacts/differential");
     if let Some(path) = arguments.replay {
-        let bytes = read_bounded(&path, rustscript_core::ParseLimits::default().max_source_bytes)
-            .map_err(|error| format!("{}: {error}", path.display()))?;
+        let bytes = read_bounded(
+            &path,
+            rustscript_core::ParseLimits::default().max_source_bytes,
+        )
+        .map_err(|error| format!("{}: {error}", path.display()))?;
         let source = String::from_utf8(bytes)
             .map_err(|_| format!("{} is not valid UTF-8", path.display()))?;
         match replay_source(&source, &oracle) {
@@ -45,7 +48,10 @@ fn run(arguments: Arguments) -> Result<(), String> {
                 println!("replay passed: {} steps", success.steps);
                 Ok(())
             }
-            Err(mut failure) => {
+            Err(ReplayError::OutsideComparisonDomain(reason)) => Err(format!(
+                "replay input is outside the comparison domain (not a differential failure): {reason}"
+            )),
+            Err(ReplayError::Failure(mut failure)) => {
                 minimize_failure(&mut failure, &oracle);
                 report_failure(&failure, &artifact_root, &oracle)
             }

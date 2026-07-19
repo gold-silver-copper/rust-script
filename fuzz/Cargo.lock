@@ -337,7 +337,6 @@ dependencies = [
 name = "rustscript-fuzz"
 version = "0.0.0"
 dependencies = [
- "arbitrary",
  "libfuzzer-sys",
  "ra_ap_syntax",
  "rustscript-core",

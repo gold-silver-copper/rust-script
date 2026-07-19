@@ -286,14 +286,30 @@ impl RustcOracle {
     }
 }
 
+/// Number of ChaCha-derived generator decisions drawn per case. Large enough
+/// that even the biggest generated program never exhausts the seed-dependent
+/// stream and falls back to the generator's seed-independent cursor counter.
+const DECISIONS_PER_CASE: usize = 4096;
+
+/// A replay input that never entered, or failed inside, differential
+/// comparison.
+#[derive(Debug)]
+pub enum ReplayError {
+    /// The replay input failed checking or trapped in the interpreter, so it
+    /// is outside the comparison domain and is not a differential failure.
+    OutsideComparisonDomain(String),
+    /// The replay input entered the comparison pipeline and failed there.
+    Failure(Box<DiffFailure>),
+}
+
 /// Generate, interpret, compile, and compare one deterministic case.
 pub fn run_case(
     seed: u64,
     case_index: usize,
     oracle: &RustcOracle,
 ) -> Result<CaseSuccess, Box<DiffFailure>> {
-    let mut rng = ChaCha8Rng::seed_from_u64(seed ^ (case_index as u64).rotate_left(29));
-    let mut decisions = [0_u64; 32];
+    let mut rng = ChaCha8Rng::seed_from_u64(mix_seed_and_case(seed, case_index as u64));
+    let mut decisions = vec![0_u64; DECISIONS_PER_CASE];
     for decision in &mut decisions {
         *decision = rng.next_u64();
     }
@@ -302,9 +318,35 @@ pub fn run_case(
     compare_source(seed, case_index, &source, oracle, true)
 }
 
+/// Mix the seed and case index so distinct `(seed, case)` pairs cannot
+/// trivially collide on one ChaCha stream seed.
+fn mix_seed_and_case(seed: u64, case_index: u64) -> u64 {
+    splitmix64(splitmix64(seed) ^ case_index.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+}
+
+/// SplitMix64 finalizer.
+fn splitmix64(value: u64) -> u64 {
+    let mut mixed = value.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    mixed ^ (mixed >> 31)
+}
+
 /// Replay an arbitrary source file through the same comparison pipeline.
-pub fn replay_source(source: &str, oracle: &RustcOracle) -> Result<CaseSuccess, Box<DiffFailure>> {
-    compare_source(0, 0, source, oracle, false)
+///
+/// Inputs that fail checking or trap in the interpreter are reported as
+/// [`ReplayError::OutsideComparisonDomain`]: the differential comparison
+/// domain only contains accepted, non-trapping programs, so such inputs are
+/// not pretty-print or oracle failures.
+pub fn replay_source(source: &str, oracle: &RustcOracle) -> Result<CaseSuccess, ReplayError> {
+    let checked = rustscript_core::check_source(source, rustscript_core::ParseLimits::default())
+        .map_err(|error| {
+            ReplayError::OutsideComparisonDomain(format!("replay input failed checking: {error}"))
+        })?;
+    rustscript_core::run(&checked, rustscript_core::Limits::default()).map_err(|error| {
+        ReplayError::OutsideComparisonDomain(format!("replay input trapped: {error}"))
+    })?;
+    compare_source(0, 0, source, oracle, false).map_err(ReplayError::Failure)
 }
 
 fn compare_source(
@@ -328,19 +370,20 @@ fn compare_source(
             )
         })?;
     let canonical = rustscript_core::format(&checked);
-    let reparsed = rustscript_core::check_source(&canonical, rustscript_core::ParseLimits::default())
-        .map_err(|error| {
-            failure(
-                DiffFailureKind::PrettyPrintRoundTrip,
-                seed,
-                case_index,
-                source,
-                &canonical,
-                format!("formatted source failed checking: {error}"),
-                Vec::new(),
-                None,
-            )
-        })?;
+    let reparsed =
+        rustscript_core::check_source(&canonical, rustscript_core::ParseLimits::default())
+            .map_err(|error| {
+                failure(
+                    DiffFailureKind::PrettyPrintRoundTrip,
+                    seed,
+                    case_index,
+                    source,
+                    &canonical,
+                    format!("formatted source failed checking: {error}"),
+                    Vec::new(),
+                    None,
+                )
+            })?;
     if !checked.structurally_eq(&reparsed)
         || rustscript_core::format(&reparsed) != canonical
         || (require_canonical_input && canonical != source)
@@ -629,7 +672,7 @@ pub fn minimize_failure(failure: &mut DiffFailure, oracle: &RustcOracle) {
         candidates.dedup();
         let mut accepted = None;
         for candidate in candidates {
-            if let Err(candidate_failure) = replay_source(&candidate, oracle)
+            if let Err(ReplayError::Failure(candidate_failure)) = replay_source(&candidate, oracle)
                 && candidate_failure.kind == failure.kind
             {
                 accepted = Some(candidate);
@@ -703,8 +746,9 @@ pub fn write_failure_artifact_with_oracle(
     let artifact_rustc_arguments = compile_arguments(&replay_path, &artifact_executable);
     let artifact_rustc_argv =
         oracle.map(|oracle| argv_from_arguments(oracle.rustc_path(), &artifact_rustc_arguments));
+    let generator = rustscript_core::GENERATOR_LIMITS;
     let mut metadata = format!(
-        "seed={}\ncase={}\ncategory={:?}\nreason={}\nhost_os={}\nhost_arch={}\nrustc_version=\n{}frontend_max_source_bytes={}\nfrontend_max_tokens={}\nfrontend_max_delimiter_depth={}\nfrontend_max_syntax_elements={}\nfrontend_max_syntax_depth={}\nfrontend_max_functions={}\nfrontend_max_parameters={}\ngenerator_helpers=0..=4\ngenerator_parameters=0..=3\ngenerator_statements=0..=8\ngenerator_expression_depth=5\ngenerator_loop_depth=2\ngenerator_loop_bound=8\ngenerator_output_lines=64\ninterpreter_fuel={}\ninterpreter_call_depth={}\ninterpreter_output_bytes={}\nreproduce_argv_json={}\nreplay_argv_json={}\n",
+        "seed={}\ncase={}\ncategory={:?}\nreason={}\nhost_os={}\nhost_arch={}\nrustc_version=\n{}frontend_max_source_bytes={}\nfrontend_max_tokens={}\nfrontend_max_delimiter_depth={}\nfrontend_max_syntax_elements={}\nfrontend_max_syntax_depth={}\nfrontend_max_functions={}\nfrontend_max_parameters={}\ngenerator_helpers=0..={}\ngenerator_parameters=0..={}\ngenerator_statements=0..={}\ngenerator_expression_depth={}\ngenerator_loop_depth={}\ngenerator_loop_bound={}\ngenerator_output_lines={}\ninterpreter_fuel={}\ninterpreter_call_depth={}\ninterpreter_output_bytes={}\nreproduce_argv_json={}\nreplay_argv_json={}\n",
         failure.seed,
         failure.case_index,
         failure.kind,
@@ -719,6 +763,13 @@ pub fn write_failure_artifact_with_oracle(
         frontend.max_syntax_depth,
         frontend.max_functions,
         frontend.max_parameters,
+        generator.maximum_helpers,
+        generator.maximum_parameters,
+        generator.maximum_statements,
+        generator.maximum_expression_depth,
+        generator.maximum_loop_depth,
+        generator.maximum_loop_bound,
+        generator.maximum_output_lines,
         runtime.fuel,
         runtime.maximum_call_depth,
         runtime.maximum_output_bytes,
@@ -1002,6 +1053,11 @@ fn receive_reader(
 
 #[cfg(unix)]
 fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
+    // Skip the process-group kill entirely when the child has already exited:
+    // its process-group id may have been recycled by an unrelated process.
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
     let process_group = format!("-{}", child.id());
     let group_kill_succeeded = Command::new("kill")
         .args(["-KILL", "--", &process_group])
@@ -1142,47 +1198,55 @@ mod tests {
     #[test]
     fn trap_suite_matches_native_failure_categories() {
         let oracle = RustcOracle::discover(None);
-        for (name, source, expected_message) in [
+        for (name, source, expected_message, native_category) in [
             (
                 "addition overflow",
                 "fn max() -> i64 { 9223372036854775807_i64 } fn one() -> i64 { 1_i64 } fn main() { max() + one(); }",
                 "integer arithmetic overflow",
+                "overflow",
             ),
             (
                 "multiplication overflow",
                 "fn big() -> i64 { 3037000500_i64 } fn main() { big() * big(); }",
                 "integer arithmetic overflow",
+                "overflow",
             ),
             (
                 "division by zero",
                 "fn one() -> i64 { 1_i64 } fn zero() -> i64 { 0_i64 } fn main() { one() / zero(); }",
                 "division by zero",
+                "divide by zero",
             ),
             (
                 "remainder by zero",
                 "fn one() -> i64 { 1_i64 } fn zero() -> i64 { 0_i64 } fn main() { one() % zero(); }",
                 "remainder by zero",
+                "remainder",
             ),
             (
                 "negation overflow",
                 "fn min(x: i64) -> i64 { x - 1_i64 } fn main() { let x: i64 = min(-9223372036854775807_i64); -x; }",
                 "integer negation overflow",
+                "overflow",
             ),
             (
                 "division overflow",
                 "fn min(x: i64) -> i64 { x - 1_i64 } fn neg_one() -> i64 { -1_i64 } fn main() { let x: i64 = min(-9223372036854775807_i64); x / neg_one(); }",
                 "integer arithmetic overflow",
+                "overflow",
             ),
             (
                 "remainder overflow",
                 "fn min(x: i64) -> i64 { x - 1_i64 } fn neg_one() -> i64 { -1_i64 } fn main() { let x: i64 = min(-9223372036854775807_i64); x % neg_one(); }",
                 "integer arithmetic overflow",
+                "overflow",
             ),
         ] {
-            let checked = rustscript_core::check_source(source, rustscript_core::ParseLimits::default())
-                .unwrap_or_else(|error| panic!("{name} did not check: {error}"));
-            let error = rustscript_core::run(&checked, rustscript_core::Limits::default())
-                .unwrap_err();
+            let checked =
+                rustscript_core::check_source(source, rustscript_core::ParseLimits::default())
+                    .unwrap_or_else(|error| panic!("{name} did not check: {error}"));
+            let error =
+                rustscript_core::run(&checked, rustscript_core::Limits::default()).unwrap_err();
             assert_eq!(error.diagnostic.message, expected_message, "{name}");
 
             let native = oracle
@@ -1196,6 +1260,13 @@ mod tests {
             let native = native.native.expect("native run");
             assert!(!native.success, "{name}");
             assert!(native.stdout.is_empty(), "{name}");
+            // Category signal, not prose equality: rustc phrasings vary, but
+            // each panic message contains a stable lowercase substring.
+            let stderr = String::from_utf8_lossy(&native.stderr).to_lowercase();
+            assert!(
+                stderr.contains(native_category),
+                "{name}: native stderr lacked `{native_category}`: {stderr}"
+            );
         }
     }
 
@@ -1302,7 +1373,10 @@ mod tests {
 
         let oracle = RustcOracle::discover(Some(fake_rustc))
             .with_timeouts(Duration::from_millis(50), Duration::from_secs(1));
-        let failure = replay_source("fn main() {}", &oracle).unwrap_err();
+        let ReplayError::Failure(failure) = replay_source("fn main() {}", &oracle).unwrap_err()
+        else {
+            panic!("compiler timeout must be an in-domain differential failure");
+        };
         assert_eq!(failure.kind, DiffFailureKind::CompilerTimeout);
     }
 
@@ -1311,9 +1385,67 @@ mod tests {
         let oracle = RustcOracle::discover(None);
         let _ = oracle.version().unwrap();
         let oracle = oracle.with_stream_cap(1);
-        let failure =
-            replay_source("fn main() { println!(\"{}\", 123_i64); }", &oracle).unwrap_err();
+        let ReplayError::Failure(failure) =
+            replay_source("fn main() { println!(\"{}\", 123_i64); }", &oracle).unwrap_err()
+        else {
+            panic!("capture truncation must be an in-domain differential failure");
+        };
         assert_eq!(failure.kind, DiffFailureKind::OutputCaptureTruncated);
+    }
+
+    #[test]
+    fn replay_inputs_outside_the_comparison_domain_are_not_diff_failures() {
+        let oracle = RustcOracle::discover(None);
+        let unchecked = replay_source("fn main() { undefined(); }", &oracle).unwrap_err();
+        assert!(matches!(
+            unchecked,
+            ReplayError::OutsideComparisonDomain(ref reason) if reason.contains("failed checking")
+        ));
+        let trapping = replay_source(
+            "fn zero() -> i64 { 0_i64 } fn main() { 1_i64 / zero(); }",
+            &oracle,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            trapping,
+            ReplayError::OutsideComparisonDomain(ref reason) if reason.contains("trapped")
+        ));
+    }
+
+    #[test]
+    fn seeded_cases_produce_diverse_generated_programs() {
+        use rand_core::Rng;
+        use std::collections::HashSet;
+        let mut sources = HashSet::new();
+        let mut fallback_like = 0_usize;
+        for case_index in 0_u64..200 {
+            let mut rng = ChaCha8Rng::seed_from_u64(mix_seed_and_case(1, case_index));
+            let mut decisions = vec![0_u64; DECISIONS_PER_CASE];
+            for decision in &mut decisions {
+                *decision = rng.next_u64();
+            }
+            let generated = rustscript_core::generate_checked_program(&decisions);
+            let stdout = rustscript_core::run(&generated, rustscript_core::Limits::default())
+                .expect("generated programs must not trap")
+                .stdout;
+            if stdout == b"0\nfalse\n" {
+                fallback_like += 1;
+            }
+            sources.insert(rustscript_core::format(&generated));
+        }
+        let with_break = sources
+            .iter()
+            .filter(|source| source.contains("break;"))
+            .count();
+        eprintln!(
+            "distinct={} fallback_like={fallback_like} with_break={with_break}",
+            sources.len()
+        );
+        assert!(
+            sources.len() >= 190,
+            "only {} distinct programs across 200 cases",
+            sources.len()
+        );
     }
 
     #[test]
@@ -1332,7 +1464,12 @@ mod tests {
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(8))]
 
+        // Ignored by default: fresh random seeds against real rustc would
+        // break the deterministic default `cargo test` run and add dozens of
+        // rustc invocations. Exercised explicitly via `--ignored` (CI wiring
+        // is handled separately).
         #[test]
+        #[ignore = "randomized rustc-backed property; run explicitly with --ignored"]
         fn generated_programs_compile_and_match_native(seed in any::<u64>(), case_index in 0usize..8) {
             let oracle = RustcOracle::discover(None);
             let success = run_case(seed, case_index, &oracle)
