@@ -7,13 +7,11 @@ Do not delete this file's structure.
 
 ## P2 — verification depth
 
-- [ ] Run a long `parser_bytes` fuzz campaign (hours, not `-runs=100`);
-      minimize any finding into `fuzz/regressions/` (the committed home —
-      `fuzz/corpus/` is gitignored) with a category note. Status
-      (2026-07-18): campaigns surfaced the frontmatter lexer panic (fixed,
-      see done log) plus rediscoveries of the two known check_parser
-      dependency crashes; the target now guards all known-crash classes so
-      a clean full-hour run is still needed to call this closed.
+- [x] Run a long `parser_bytes` fuzz campaign. Done 2026-07-19: after the
+      frontmatter fix and the admitted-trees-only `check_parser` change, a
+      full hour ran 27,612,191 executions with no crash. Earlier campaigns
+      found and fixed the frontmatter lexer panic and hardened the
+      `check_parser` strategy (see done log and issue #3).
 - [x] Run a long `ast_roundtrip` campaign the same way. Done 2026-07-19:
       a 30-minute campaign ran 400,283 executions with no crash.
 - [ ] Differential volume: run `rustscript-difftest` with several fresh
