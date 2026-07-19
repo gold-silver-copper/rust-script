@@ -9,18 +9,17 @@ Do not delete this file's structure.
 
 - [ ] Run a long `parser_bytes` fuzz campaign (hours, not `-runs=100`);
       minimize any finding into `fuzz/regressions/` (the committed home —
-      `fuzz/corpus/` is gitignored) with a category note. This is the
-      highest-value unexecuted validation in the project. Status: a
-      one-hour campaign is IN PROGRESS (2026-07-18); the first attempt
-      rediscovered the known `{#}` check_parser dependency panic within a
-      minute, so the target now guards that class (see
-      `docs/regression-corpus.md`).
+      `fuzz/corpus/` is gitignored) with a category note. Status
+      (2026-07-18): campaigns surfaced the frontmatter lexer panic (fixed,
+      see done log) plus rediscoveries of the two known check_parser
+      dependency crashes; the target now guards all known-crash classes so
+      a clean full-hour run is still needed to call this closed.
 - [ ] Run a long `ast_roundtrip` campaign the same way.
 - [ ] Differential volume: run `rustscript-difftest` with several fresh
       seeds at `--cases 5000+`; record seeds tried (and results) here so
       seeds are not repeated: tried so far — seed 1 (×1000, ×200, ×100),
-      seed 7 (×100), seed 12345 (spot), seed 424242 (×5000 IN PROGRESS
-      2026-07-18).
+      seed 7 (×100), seed 12345 (spot), seed 424242 (×5000, PASSED
+      2026-07-18). No mismatch found at any seed to date.
 - [ ] Property test that `format_program` output always reparses+rechecks
       to structurally equal IR for arbitrary *admitted* (not generated)
       sources harvested from the fuzz corpus.

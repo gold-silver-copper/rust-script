@@ -3,6 +3,16 @@
 
 use libfuzzer_sys::fuzz_target;
 
+// A `---` frontmatter block, optionally preceded by a single shebang line,
+// triggers the pinned rust-analyzer frontmatter lexer panic.
+fn triggers_frontmatter(text: &str) -> bool {
+    let after_shebang = match text.strip_prefix("#!") {
+        Some(rest) => rest.split_once('\n').map_or(rest, |(_, body)| body),
+        None => text,
+    };
+    after_shebang.trim_start().starts_with("---")
+}
+
 fuzz_target!(|data: &[u8]| {
     let limits = rustscript_core::ParseLimits {
         max_source_bytes: 64 * 1024,
@@ -10,22 +20,28 @@ fuzz_target!(|data: &[u8]| {
         max_syntax_elements: 20_000,
         ..rustscript_core::ParseLimits::default()
     };
+
+    // Known dependency crash (pinned ra_ap_parser 0.0.342, documented in
+    // docs/regression-corpus.md): frontmatter — a `---` block at the start,
+    // optionally after a shebang line — drives the Edition 2024 frontmatter
+    // probe to panic inside `LexedStr::new`. The production path contains
+    // that unwind as a `Lex` diagnostic (see the containment test in
+    // rustscript-core), but this fuzz binary builds with `panic = abort`, so
+    // `catch_unwind` cannot save it here — the whole iteration is skipped.
+    // Remove when the rust-analyzer pin advances and re-run the regression
+    // input `fuzz/regressions/parser_bytes/frontmatter_lexer_panic.txt`.
+    if std::str::from_utf8(data).is_ok_and(triggers_frontmatter) {
+        return;
+    }
+
     // Exercise rust-analyzer's own tree invariants on every bounded, valid
     // UTF-8 input — including non-ASCII text that rustscript itself rejects.
-    // A panic here is a dependency fuzz finding.
-    //
-    // Known findings for the pinned 0.0.342 release, both documented in
-    // docs/regression-corpus.md: `{#}` (attribute recovery) and a leading
-    // `---` (Edition 2024 frontmatter probe) each trip a check_parser
-    // invariant panic. Inputs containing `#`, or beginning with `---`, are
-    // skipped here so long campaigns are not permanently blocked on these
-    // known crashes; rustscript's own path rejects or contains both.
-    // Remove these guards when the rust-analyzer pin advances and re-run the
-    // regression inputs to revalidate.
+    // A panic here is a dependency fuzz finding. `{#}` (attribute recovery)
+    // is a second known 0.0.342 check_parser crash the product path rejects
+    // at the token policy; inputs containing `#` skip only this call.
     if let Ok(text) = std::str::from_utf8(data)
         && text.len() <= limits.max_source_bytes
         && !data.contains(&b'#')
-        && !text.trim_start().starts_with("---")
     {
         ra_ap_syntax::fuzz::check_parser(text);
     }
