@@ -1003,18 +1003,28 @@ fn receive_reader(
 #[cfg(unix)]
 fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
     let process_group = format!("-{}", child.id());
-    let group_kill = Command::new("kill")
+    let group_kill_succeeded = Command::new("kill")
         .args(["-KILL", &process_group])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
-    if group_kill.is_ok_and(|status| status.success()) {
-        return Ok(());
-    }
+        .status()
+        .is_ok_and(|status| status.success());
     match child.try_wait()? {
         Some(_) => Ok(()),
-        None => child.kill(),
+        None => match child.kill() {
+            Ok(()) => Ok(()),
+            Err(error)
+                if group_kill_succeeded
+                    && matches!(
+                        error.kind(),
+                        io::ErrorKind::InvalidInput | io::ErrorKind::NotFound
+                    ) =>
+            {
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
     }
 }
 
