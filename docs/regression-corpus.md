@@ -23,7 +23,7 @@ active fuzz corpus.
 | Flow-sensitive Rust subset soundness | nested `return`, short-circuit RHS divergence, final `while` tails | `rejects_profile_edge_cases` |
 | Recursive unreachable locals | thousands of unreachable locals after recursive call | `unreachable_locals_do_not_preallocate_every_recursive_frame` |
 | Cross-helper arithmetic growth | four helper layers each multiply an earlier result by `9_i64` five times | `overflowing_helper_chain_uses_the_safe_suitability_fallback` and the evaluator-backed generator filter |
-| Concurrent oracle timeouts | cloned oracles enter `wait_timeout` together on Unix | process-wide wait serialization and `serializes_concurrent_timeout_waits` |
+| Concurrent oracle timeouts | cloned oracles time out subprocesses concurrently on Unix | serialized polling waits and `serializes_concurrent_timeout_waits` |
 | Dependency parser invariant | `{#}` reproduces a pinned `ra_ap_syntax::fuzz::check_parser` invariant panic for `0.0.342` | Documented dependency finding; product byte/token policy rejects `#` before parsing |
 
 Known dependency finding reproduction:

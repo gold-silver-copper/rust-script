@@ -7,17 +7,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
-use wait_timeout::ChildExt;
 
 const DEFAULT_STREAM_CAP: usize = 1024 * 1024;
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
-// wait-timeout 0.2.1 coordinates Unix SIGCHLD handling through process-global
-// state. Serializing this boundary prevents cloned oracles from corrupting one
-// another's timeout waits and is the runner's required one-worker default.
+const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+// Keep subprocess waits one-at-a-time for reproducible oracle behavior under
+// cargo's concurrent test runner and the standalone runner's one-worker default.
 static PROCESS_WAIT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Safe wrapper around a rustc subprocess oracle.
@@ -936,7 +935,7 @@ fn capture_child(
         .ok_or(OracleError::MissingPipe("stderr"))?;
     let stdout_reader = spawn_reader(stdout, cap);
     let stderr_reader = spawn_reader(stderr, cap);
-    let wait_result = child.wait_timeout(timeout);
+    let wait_result = wait_with_timeout(&mut child, timeout);
     let (status, timed_out) = match wait_result {
         Ok(Some(status)) => (status, false),
         Ok(None) => {
@@ -948,7 +947,7 @@ fn capture_child(
             return match cleanup {
                 Ok(()) => Err(OracleError::Io(wait_error)),
                 Err(cleanup_error) => Err(OracleError::Io(io::Error::other(format!(
-                    "wait_timeout failed: {wait_error}; cleanup failed: {cleanup_error}"
+                    "subprocess wait failed: {wait_error}; cleanup failed: {cleanup_error}"
                 )))),
             };
         }
@@ -963,6 +962,20 @@ fn capture_child(
         stdout_truncated,
         stderr_truncated,
     ))
+}
+
+fn wait_with_timeout(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let elapsed = start.elapsed();
+        if elapsed >= timeout {
+            return Ok(None);
+        }
+        thread::sleep(WAIT_POLL_INTERVAL.min(timeout - elapsed));
+    }
 }
 
 fn spawn_reader(
