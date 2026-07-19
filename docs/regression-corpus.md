@@ -22,6 +22,8 @@ active fuzz corpus.
 | Nested macro runtime span mapping | `println!("{}", 1_i64 + (2_i64 / 0_i64))` | `println_nested_runtime_spans_map_to_original_source` |
 | Flow-sensitive Rust subset soundness | nested `return`, short-circuit RHS divergence, final `while` tails | `rejects_profile_edge_cases` |
 | Recursive unreachable locals | thousands of unreachable locals after recursive call | `unreachable_locals_do_not_preallocate_every_recursive_frame` |
+| Cross-helper arithmetic growth | four helper layers each multiply an earlier result by `9_i64` five times | `overflowing_helper_chain_uses_the_safe_suitability_fallback` and the evaluator-backed generator filter |
+| Concurrent oracle timeouts | cloned oracles enter `wait_timeout` together on Unix | process-wide wait serialization and `serializes_concurrent_timeout_waits` |
 | Dependency parser invariant | `{#}` reproduces a pinned `ra_ap_syntax::fuzz::check_parser` invariant panic for `0.0.342` | Documented dependency finding; product byte/token policy rejects `#` before parsing |
 
 Known dependency finding reproduction:

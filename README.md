@@ -73,6 +73,41 @@ fields, indexes, arrays/non-unit tuples, paths, casts, references, dereference,
 ownership/borrowing, closures, `match`, `loop`, `for`, ranges, labels,
 `if let`/`while let`, `?`, and macros other than the fixed print intrinsic.
 
+The exact declaration and statement forms are:
+
+```text
+function  := fn IDENT "(" (parameter ("," parameter)*)? ")" ("->" type)? block
+parameter := IDENT ":" type
+type      := i64 | bool | ()
+block     := "{" statement* expression? "}"
+
+statement := let "mut"? IDENT (":" type)? "=" expression ";"
+           | IDENT "=" expression ";"
+           | while expression block
+           | return expression? ";"
+           | break ";"
+           | continue ";"
+           | println! ( "{}", expression ) ";"
+           | expression ";"
+```
+
+There are no trailing commas or empty statements. A `while` statement has no
+following semicolon. A block may have one final value expression without a
+semicolon; every non-tail expression requires one. `if` is only an expression
+with explicit `else { ... }`, and assignment, `return`, `break`, `continue`,
+`while`, and `println!` cannot be used as expressions.
+
+The committed normative examples have these exact stdout bytes:
+
+| Example | Stdout |
+| --- | --- |
+| `arithmetic.rs` | `42\n` |
+| `evaluation_order.rs` | `1\n2\n30\n` |
+| `short_circuit.rs` | `false\ntrue\n` |
+| `sum_loop.rs` | `55\n` |
+| `gcd.rs` | `6\n` |
+| `shadowing.rs` | `2\n` |
+
 ## Architecture and safeguards
 
 The frontend is reuse-first:

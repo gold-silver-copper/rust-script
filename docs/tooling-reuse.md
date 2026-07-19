@@ -44,9 +44,11 @@ cargo metadata --format-version 1 --filter-platform wasm32-unknown-unknown
 RUSTFLAGS='--cfg no_salsa_async_drops' cargo check --target wasm32-unknown-unknown
 ```
 
-The dependency-only WASM check succeeded in 13.54 seconds, so compilation alone
-is not the blocker. The three-crate spike resolved 130 packages. Inspection of
-the published primary crate manifests and resulting graph found:
+The dependency-only WASM check succeeded in 14.38 seconds, so compilation alone
+is not the blocker. The locked reproduction resolved 137 packages; the
+[complete package/version and normal/build edge tree](hir-spike-tree.md) is
+committed with its exact manifest inputs and commands. Inspection of the
+published primary crate manifests and resulting graph found:
 
 - `ra_ap_base_db` and `ra_ap_hir_ty` enable Salsa's `rayon` and
   `salsa_unstable` features;

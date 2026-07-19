@@ -8,6 +8,7 @@ use crate::{Type, Value};
 
 const GENERATED_RANGE: TextRange = TextRange::empty(TextSize::new(0));
 const MAX_EXPRESSION_DEPTH: usize = 5;
+const MAX_OUTPUT_LINES: usize = 64;
 
 /// Build a bounded, typed, terminating checked program from a decision stream.
 ///
@@ -15,7 +16,49 @@ const MAX_EXPRESSION_DEPTH: usize = 5;
 /// source-string or parsed-AST generator. The canonical emitter is the only
 /// path from generated semantics to Rust text.
 pub fn generate_checked_program(decisions: &[u64]) -> CheckedProgram {
-    Generator::new(decisions).program()
+    let candidate = Generator::new(decisions).program();
+    if candidate_is_suitable(&candidate) {
+        candidate
+    } else {
+        safe_fallback_program()
+    }
+}
+
+fn candidate_is_suitable(candidate: &CheckedProgram) -> bool {
+    match crate::run(candidate, crate::RuntimeLimits::default()) {
+        Ok(result) => {
+            result.stdout.iter().filter(|byte| **byte == b'\n').count() <= MAX_OUTPUT_LINES
+        }
+        Err(_) => false,
+    }
+}
+
+fn safe_fallback_program() -> CheckedProgram {
+    let main = Function {
+        name: SmolStr::new("main"),
+        parameters: Vec::new(),
+        return_type: Type::Unit,
+        explicit_return: false,
+        local_count: 0,
+        body: Block {
+            statements: vec![
+                Statement::Print {
+                    value: integer(0),
+                    span: GENERATED_RANGE,
+                },
+                Statement::Print {
+                    value: boolean(false),
+                    span: GENERATED_RANGE,
+                },
+            ],
+            tail: Some(Box::new(unit())),
+            span: GENERATED_RANGE,
+        },
+    };
+    CheckedProgram {
+        functions: vec![main],
+        main: 0,
+    }
 }
 
 /// Produce small, type-preserving checked-IR reductions.
@@ -1276,6 +1319,55 @@ mod tests {
             assert!(!result.stdout.is_empty(), "seed {seed}");
             assert!(result.stdout.iter().filter(|byte| **byte == b'\n').count() <= 10);
         }
+    }
+
+    #[test]
+    fn overflowing_helper_chain_uses_the_safe_suitability_fallback() {
+        let mut decisions = [0_u64; 160];
+        decisions[0] = 4;
+        for helper in 0..4 {
+            let base = 1 + helper * 20;
+            decisions[base] = 0;
+            decisions[base + 1] = 0;
+            decisions[base + 2] = 0;
+            for decision in &mut decisions[base + 3..=base + 7] {
+                *decision = 3;
+            }
+            if helper == 0 {
+                decisions[base + 8] = 0;
+                decisions[base + 9] = 40;
+            } else {
+                decisions[base + 8] = 2;
+                decisions[base + 9] = (helper - 1) as u64;
+            }
+            for index in 0..5 {
+                decisions[base + 10 + index * 2] = 8;
+                decisions[base + 11 + index * 2] = 2;
+            }
+        }
+        decisions[81] = 40;
+        decisions[82] = 0;
+        decisions[84] = 1;
+        for decision in &mut decisions[85..=89] {
+            *decision = 3;
+        }
+        decisions[90] = 2;
+        decisions[91] = 3;
+        for index in 0..5 {
+            decisions[92 + index * 2] = 8;
+            decisions[93 + index * 2] = 2;
+        }
+
+        let raw = super::Generator::new(&decisions).program();
+        let error = run(&raw, RuntimeLimits::default())
+            .expect_err("constructed raw candidate must overflow");
+        assert_eq!(error.message, "integer arithmetic overflow");
+
+        let filtered = super::generate_checked_program(&decisions);
+        let result = run(&filtered, RuntimeLimits::default())
+            .expect("public generator must return the nontrapping fallback");
+        assert_eq!(result.stdout, b"0\nfalse\n");
+        assert_eq!(filtered.functions.len(), 1);
     }
 
     #[test]

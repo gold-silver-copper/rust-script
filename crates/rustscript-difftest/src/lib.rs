@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::thread;
 use std::time::Duration;
 
@@ -15,6 +15,10 @@ use wait_timeout::ChildExt;
 
 const DEFAULT_STREAM_CAP: usize = 1024 * 1024;
 const READER_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+// wait-timeout 0.2.1 coordinates Unix SIGCHLD handling through process-global
+// state. Serializing this boundary prevents cloned oracles from corrupting one
+// another's timeout waits and is the runner's required one-worker default.
+static PROCESS_WAIT_LOCK: Mutex<()> = Mutex::new(());
 
 /// Safe wrapper around a rustc subprocess oracle.
 #[derive(Clone, Debug)]
@@ -896,6 +900,9 @@ fn run_command(
     cap: usize,
     native: bool,
 ) -> Result<ProcessCapture, OracleError> {
+    let _wait_guard = PROCESS_WAIT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut command = Command::new(program);
     command
         .args(arguments)
@@ -1204,6 +1211,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn serializes_concurrent_timeout_waits() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let fake_rustc = directory.path().join("rustc");
+        std::fs::write(&fake_rustc, "#!/bin/sh\nsleep 5\n").unwrap();
+        let mut permissions = std::fs::metadata(&fake_rustc).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fake_rustc, permissions).unwrap();
+
+        let oracle = RustcOracle::discover(Some(fake_rustc))
+            .with_timeouts(Duration::from_millis(50), Duration::from_secs(1));
+        let workers: Vec<_> = (0..4)
+            .map(|_| {
+                let oracle = oracle.clone();
+                std::thread::spawn(move || oracle.version())
+            })
+            .collect();
+        for worker in workers {
+            let error = worker
+                .join()
+                .expect("version worker must not panic")
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                OracleError::VersionFailed {
+                    timed_out: true,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
