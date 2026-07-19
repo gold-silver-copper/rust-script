@@ -17,7 +17,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: RUSTDOCFLAGS='-D missing-docs' cargo doc --workspace --no-deps
-      - run: cargo test --workspace
+      - run: cargo test --workspace --exclude rustscript-difftest
+      - run: cargo test -p rustscript-difftest -- --test-threads=1
       - run: cargo run -p rustscript-difftest -- --seed 1 --cases 25
 
   wasm:
