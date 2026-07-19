@@ -14,11 +14,11 @@ Do not delete this file's structure.
       `check_parser` strategy (see done log and issue #3).
 - [x] Run a long `ast_roundtrip` campaign the same way. Done 2026-07-19:
       a 30-minute campaign ran 400,283 executions with no crash.
-- [ ] Differential volume: run `rustscript-difftest` with several fresh
-      seeds at `--cases 5000+`; record seeds tried (and results) here so
-      seeds are not repeated: tried so far — seed 1 (×1000, ×200, ×100),
-      seed 7 (×100), seed 12345 (spot), seed 424242 (×5000, PASSED
-      2026-07-18). No mismatch found at any seed to date.
+- [ ] Differential volume (ongoing hygiene — never "closeable"; run a
+      fresh seed each idle iteration): tried so far — seed 1 (×1000, ×200,
+      ×100), seed 7 (×100), seed 12345 (spot), seed 424242 (×5000, PASSED
+      2026-07-18), seed 987654 (×5000, PASSED 2026-07-19), seed 555123
+      (×10000, PASSED 2026-07-19). No mismatch found at any seed to date.
 - [x] Property test for the parsed-tree emitter (`format_program`). Done
       2026-07-19: `format_program_is_idempotent_and_preserves_checked_ir`
       (feature-gated proptest) generates admitted programs, then asserts
