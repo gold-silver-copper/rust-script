@@ -135,3 +135,28 @@ fn source_errors_exit_one_and_usage_errors_exit_two() {
     assert!(usage.stdout.is_empty());
     assert!(!usage.stderr.is_empty());
 }
+
+#[test]
+fn missing_file_exits_one_with_empty_stdout_and_a_diagnostic() {
+    let directory = TestDir::new();
+    let missing = directory.path().join("does-not-exist.rs");
+    let output = Command::new(binary())
+        .args(["run", missing.to_str().expect("UTF-8 path")])
+        .output()
+        .expect("missing file command");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(!output.stderr.is_empty());
+}
+
+#[test]
+fn runtime_trap_writes_partial_stdout_before_the_diagnostic() {
+    let (_directory, path) = source_file("fn main() { println!(\"{}\", 1_i64); 1_i64 / 0_i64; }");
+    let output = Command::new(binary())
+        .args(["run", path.to_str().expect("UTF-8 path")])
+        .output()
+        .expect("trapping run command");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.stdout, b"1\n");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("division by zero"));
+}

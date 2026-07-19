@@ -6,7 +6,7 @@ project token model, parser cursor, syntax AST, precedence table, or line index.
 
 | Need | Reused API | Rustscript-specific policy |
 | --- | --- | --- |
-| Rust token boundaries and errors | `ra_ap_parser::LexedStr` in `Edition2024` | Bounded whitelist over lexer-provided kinds, text, and ranges |
+| Rust token boundaries and errors | `ra_ap_parser::LexedStr` in `Edition2024` | Bounded whitelist over lexer-provided kinds, text, and ranges; the prefix-run bound capping consecutive prefix-position tokens is likewise policy over `LexedStr` tokens, not lexical analysis |
 | Rust 2024 parsing | `ra_ap_syntax::SourceFile::parse` | Native unwind containment and strict rejection of parser errors/recovery nodes |
 | Parser validation | `Parse::errors`, `SyntaxKind::ERROR` | Stable diagnostic conversion |
 | Typed syntax admission | `ast::Item`, `ast::Stmt`, `ast::Expr`, `ast::Type`, `ast::Pat`, and AST traits | Exhaustive strict-subset admission |

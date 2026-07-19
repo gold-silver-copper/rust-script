@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use annotate_snippets::{AnnotationKind, Level, Renderer, Snippet};
-use rustscript_core::{Diagnostic, ParseLimits, Limits};
+use rustscript_core::{Diagnostic, Limits, ParseLimits};
 
 fn main() -> ExitCode {
     match run_cli(std::env::args_os().skip(1).collect()) {

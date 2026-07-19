@@ -3,6 +3,11 @@ import { RustscriptWorkerHost } from "/host.js";
 export async function browserWorkerRecovery() {
   const workers = [];
   const objectUrls = [];
+  // Worker death is simulated with a thrown error because a genuine
+  // terminate() fires no event in browsers, so it is unobservable here; the
+  // thrown error is the observable analogue of a wasm abort. Genuine
+  // terminate() recovery is only testable in Node and is covered by
+  // host.test.mjs.
   const sources = [
     `self.onmessage = () => {
       throw new Error("intentional rustscript worker abort");
@@ -26,7 +31,11 @@ export async function browserWorkerRecovery() {
       host.request("check", "fn main() {}"),
       "worker abort",
     );
-    if (failed.ok || failed.error?.message !== "frontend-aborted") {
+    if (
+      failed.ok ||
+      failed.error?.phase !== "frontend" ||
+      failed.error?.message !== "frontend-aborted"
+    ) {
       throw new Error(`unexpected failure response: ${JSON.stringify(failed)}`);
     }
     if (!workers[0].terminated) {

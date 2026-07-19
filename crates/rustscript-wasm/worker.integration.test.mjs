@@ -5,9 +5,15 @@ import { Worker } from "node:worker_threads";
 
 const generatedGlue = new URL("./pkg/rustscript_wasm.js", import.meta.url);
 
+// Skip loudly rather than silently: the runner prints this message so a
+// missing pkg/ directory is visible in the test summary.
+const skipReason = existsSync(generatedGlue)
+  ? false
+  : "generated pkg/rustscript_wasm.js is missing; run `npm run build` (wasm-pack build) in crates/rustscript-wasm first";
+
 test(
   "committed worker executes the generated wasm package",
-  { skip: existsSync(generatedGlue) ? false : "run npm run build first" },
+  { skip: skipReason },
   async () => {
     const worker = new Worker(new URL("./worker.js", import.meta.url), { type: "module" });
     try {
@@ -32,6 +38,17 @@ test(
       });
       assert.equal(invalid.ok, false);
       assert.equal(invalid.error.phase, "type");
+
+      const unknown = await request(worker, {
+        id: 3,
+        operation: "not-an-export",
+        source: "",
+        options: {},
+      });
+      assert.deepEqual(unknown, {
+        ok: false,
+        error: { phase: "frontend", message: "unknown operation" },
+      });
     } finally {
       await worker.terminate();
     }

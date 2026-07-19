@@ -46,7 +46,7 @@ test("reports frontend abort and replaces the failed worker", async () => {
   workers[0].abort();
   assert.deepEqual(await failedRequest, {
     ok: false,
-    error: { phase: "parse", message: "frontend-aborted" },
+    error: { phase: "frontend", message: "frontend-aborted" },
   });
   assert.equal(workers[0].terminated, true);
   assert.equal(workers.length, 2);
@@ -62,7 +62,7 @@ test("does not leak pending calls when postMessage throws synchronously", async 
   const result = await host.request("check", () => {});
   assert.deepEqual(result, {
     ok: false,
-    error: { phase: "parse", message: "frontend-postmessage-failed" },
+    error: { phase: "frontend", message: "frontend-postmessage-failed" },
   });
   assert.equal(host.pending.size, 0);
   host.close();
@@ -84,7 +84,7 @@ test("bounds consecutive deterministic worker replacement failures", async () =>
   workers[0].abort();
   assert.deepEqual(await first, {
     ok: false,
-    error: { phase: "parse", message: "frontend-aborted" },
+    error: { phase: "frontend", message: "frontend-aborted" },
   });
   assert.equal(workers.length, 2);
 
@@ -92,10 +92,60 @@ test("bounds consecutive deterministic worker replacement failures", async () =>
   workers[1].abort();
   assert.deepEqual(await second, {
     ok: false,
-    error: { phase: "parse", message: "frontend-aborted" },
+    error: { phase: "frontend", message: "frontend-aborted" },
   });
   assert.equal(host.closed, true);
   assert.equal(workers.length, 2);
+});
+
+test("times out a silently killed worker and replaces it", async () => {
+  const workers = [];
+  const host = new RustscriptWorkerHost(
+    "worker.js",
+    () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    },
+    { requestTimeoutMillis: 20 },
+  );
+
+  // The first worker receives the request but never answers and never fires
+  // an error event, mimicking a browser reclaiming the worker process.
+  const hung = await host.request("check", "fn main() {}");
+  assert.deepEqual(hung, {
+    ok: false,
+    error: { phase: "frontend", message: "frontend-aborted" },
+  });
+  assert.equal(workers[0].terminated, true);
+  assert.equal(workers.length, 2);
+  assert.equal(host.pending.size, 0);
+
+  const recovered = host.request("check", "fn main() {}");
+  workers[1].succeed({ ok: true });
+  assert.deepEqual(await recovered, { ok: true });
+  host.close();
+});
+
+test("a timeout of zero disables the per-request deadline", async () => {
+  const workers = [];
+  const host = new RustscriptWorkerHost(
+    "worker.js",
+    () => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker;
+    },
+    { requestTimeoutMillis: 0 },
+  );
+
+  const request = host.request("check", "fn main() {}");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(host.pending.size, 1);
+  workers[0].succeed({ ok: true });
+  assert.deepEqual(await request, { ok: true });
+  assert.equal(workers.length, 1);
+  host.close();
 });
 
 class NodeWorkerAdapter {
@@ -133,7 +183,7 @@ test("recovers after an actual worker thread terminates", async () => {
   const failed = await host.request("check", "fn main() {}");
   assert.deepEqual(failed, {
     ok: false,
-    error: { phase: "parse", message: "frontend-aborted" },
+    error: { phase: "frontend", message: "frontend-aborted" },
   });
   assert.equal(generation, 2);
 

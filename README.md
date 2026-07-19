@@ -127,17 +127,29 @@ table, or handwritten line index. `ParsedProgram` keeps the rust-analyzer tree
 and `LineIndex` opaque; `CheckedProgram` is opaque resolved executable IR with
 span-insensitive structural comparison for testing.
 
-Default frontend limits are 1 MiB source, 100,000 lexer tokens, delimiter depth
-256, 200,000 syntax elements, syntax/IR depth 256, 1,024 functions, and 256
-parameters per function. Runtime defaults are 1,000,000 fuel steps, 1,024 call
-frames, and 1 MiB stdout. Every statement/expression consumes fuel. Safeguard
-errors are resource decisions, not Rust semantics.
+Default frontend limits (`ParseLimits`) are 1 MiB source, 100,000 lexer tokens,
+delimiter depth 256, 200,000 syntax elements, syntax/IR depth 256, 1,024
+functions, and 256 parameters per function. The token policy also caps runs of
+consecutive prefix-position tokens (`-`, `!`, `&`, `|`, `*`, `return`, `break`)
+at the syntax nesting limit ("prefix operator nesting limit exceeded"), because
+the parser recurses on them and a long run — for example 20,000 consecutive
+`-` — would otherwise overflow its stack before any post-parse depth check
+runs. Runtime defaults (`Limits { fuel, maximum_call_depth,
+maximum_output_bytes }`) are 1,000,000 fuel steps, 1,024 call frames, and 1 MiB
+stdout. Every statement/expression consumes fuel. Safeguard errors are resource
+decisions, not Rust semantics.
 
 Native parsing contains rust-analyzer unwinds and converts them to structured
 parse diagnostics. `wasm32-unknown-unknown` aborts on panic, so this cannot be
 claimed as recovery inside the Rust function. The JS host runs untrusted calls
-in a dedicated Worker, returns `frontend-aborted` if it dies, discards the
-instance, and creates a clean replacement. The target-specific
+in a dedicated Worker, returns a phase-`"frontend"` `frontend-aborted` failure
+if it dies or a per-request timeout expires (default 10 s, configurable,
+disable with 0), discards the instance, and creates a clean replacement.
+JS-synthesized infrastructure failures always use phase `"frontend"` so they
+are never confused with real parse diagnostics. Browsers fire no event for a
+genuinely terminated Worker, so the browser test simulates death with a thrown
+error — the observable analogue of a wasm abort — while real `terminate()`
+recovery is covered by the Node tests in `host.test.mjs`. The target-specific
 `no_salsa_async_drops` cfg selects synchronous rust-analyzer parse dropping and
 is pinned/version-audited.
 
@@ -160,15 +172,21 @@ cargo run -p rustscript-cli -- fmt examples/gcd.rs
 
 `check` is silent on success; `run` writes only script bytes; `ast` prints the
 pinned rust-analyzer syntax debug tree; `fmt` prints canonical source without
-modifying the file. Diagnostics go to stderr. Exit codes are 0 success, 1
-source/type/runtime/I/O failure, and 2 usage failure.
+modifying the file. When a run traps, the CLI first writes the partial stdout
+a native binary would have printed before the trap, then renders the runtime
+diagnostic to stderr and exits 1. Diagnostics go to stderr. Exit codes are 0
+success, 1 source/type/runtime/I/O failure, and 2 usage failure.
 
 ## WASM
 
-The adapter exports `check`, `run`, `ast`, and `format`. Responses contain
-structured phase/message/span/file/location data and, where applicable, output
-bytes, text, and step count. `host.js` and `worker.js` provide the untrusted
-worker boundary described above.
+The adapter exports `check`, `run`, `ast`, and `format`. Each takes an options
+object mirroring the core API surface: `{ frontend: ParseLimits fields,
+runtime: { fuel, maximum_call_depth, maximum_output_bytes } }`. Responses
+contain structured phase/message/span/file/location data and, where
+applicable, output bytes, text, and step count. A failed `run` mirrors
+`RuntimeDiagnostic`: it carries the partial `output` bytes and `steps`
+produced before the fault alongside `error`. `host.js` and `worker.js` provide
+the untrusted worker boundary described above.
 
 ```text
 cargo check -p rustscript-wasm --target wasm32-unknown-unknown
@@ -203,7 +221,7 @@ steps/output, rustc acceptance, native success, empty native stderr, and exact
 stdout equality.
 
 Failures use non-overwriting `artifacts/differential/seed-N-case-M/`
-directories containing original/canonical/minimized source, rust-analyzer
+directories, created relative to the runner's working directory, containing original/canonical/minimized source, rust-analyzer
 syntax, metadata/reproduction commands, and every interpreter/compiler/native
 stream. The reducer emits type-preserving checked-IR candidates and keeps a
 smaller candidate only when replay preserves the original category.
@@ -224,8 +242,9 @@ cargo +nightly fuzz tmin parser_bytes PATH_TO_CRASH
 ```
 
 `parser_bytes` drives arbitrary bytes through the bounded byte API, exercises
-rust-analyzer's parser invariant checker for bounded UTF-8, and checks canonical
-round-trip/execution after admission. `ast_roundtrip` builds the shared typed IR
+rust-analyzer's `fuzz::check_parser` invariant checker on every bounded valid
+UTF-8 input — including non-ASCII text rustscript itself rejects — and checks
+canonical round-trip/execution after admission. `ast_roundtrip` builds the shared typed IR
 from a decision stream and checks emit/parse/check structural equality and
 deterministic interpretation. Neither fuzz target invokes rustc.
 

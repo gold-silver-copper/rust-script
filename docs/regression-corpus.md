@@ -25,6 +25,7 @@ active fuzz corpus.
 | Cross-helper arithmetic growth | four helper layers each multiply an earlier result by `9_i64` five times | `overflowing_helper_chain_uses_the_safe_suitability_fallback` and the evaluator-backed generator filter |
 | Concurrent oracle timeout requests | cloned oracles request subprocess timeouts concurrently on Unix | serialized `try_wait` polling and `serializes_concurrent_timeout_waits` |
 | Dependency parser invariant | `{#}` reproduces a pinned `ra_ap_syntax::fuzz::check_parser` invariant panic for `0.0.342` | Documented dependency finding; product byte/token policy rejects `#` before parsing |
+| Dependency-recursion stack overflow on prefix-token runs | 20,000 consecutive `-` tokens (any long homogeneous run of `-`, `!`, `&`, `|`, `*`, `return`, `break`) drove `SourceFile::parse` into a fatal stack-overflow abort | Lexical prefix-run bound rejects runs above the syntax nesting limit with "prefix operator nesting limit exceeded" before parsing; regression tests in `crates/rustscript-core/src/frontend/lex_policy.rs` and `crates/rustscript-core/src/frontend/mod.rs` |
 
 `wait-timeout 0.2.1` was removed from the oracle after this regression because
 its Unix SIGCHLD coordination is process-global. The oracle now serializes the

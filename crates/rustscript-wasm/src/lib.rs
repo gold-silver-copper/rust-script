@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![doc = "WASM adapter for the rustscript semantic engine."]
 
-use rustscript_core::{Diagnostic, ParseLimits, Location, Limits};
+use rustscript_core::{Diagnostic, Limits, Location, ParseLimits};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
@@ -60,7 +60,10 @@ impl Response {
 
     /// A runtime failure keeps the partial stdout and step count produced
     /// before the fault, matching native prefix output before a trap.
-    fn runtime_failure(location: Option<Location>, failure: rustscript_core::RuntimeDiagnostic) -> Self {
+    fn runtime_failure(
+        location: Option<Location>,
+        failure: rustscript_core::RuntimeDiagnostic,
+    ) -> Self {
         Self {
             ok: false,
             output: Some(failure.stdout),
@@ -203,6 +206,11 @@ mod tests {
         for _ in 0..100 {
             assert!(response(check("fn main() {}", JsValue::NULL).unwrap()).ok);
             assert!(!response(check("fn main( {}", JsValue::NULL).unwrap()).ok);
+            // Materialize and drop the debug syntax tree as well, so each
+            // cycle covers parse, error, tree, and drop paths.
+            let tree = response(ast("fn main() {}", JsValue::NULL).unwrap());
+            assert!(tree.ok);
+            assert!(tree.text.is_some_and(|text| text.contains("SOURCE_FILE")));
         }
     }
 

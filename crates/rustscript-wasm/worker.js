@@ -30,7 +30,9 @@ const handleMessage = ({ data }) => {
   const { id, operation, source, options } = data;
   const handler = rustscript[operation];
   if (typeof handler !== "function") {
-    postResult({ id, result: { ok: false, error: { phase: "parse", message: "unknown operation" } } });
+    // "frontend" marks a JS-synthesized infrastructure failure, never a
+    // parse diagnostic produced by the engine itself.
+    postResult({ id, result: { ok: false, error: { phase: "frontend", message: "unknown operation" } } });
     return;
   }
   postResult({ id, result: handler(source, options) });
