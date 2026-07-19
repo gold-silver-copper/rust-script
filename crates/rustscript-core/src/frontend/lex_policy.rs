@@ -15,30 +15,38 @@ pub(super) fn validate(source: &str, limits: ParseLimits) -> Result<(), Diagnost
     }
 
     let mut delimiters = Vec::new();
-    let mut prefix_run = 0usize;
+    let mut prefix_nesting = 0usize;
+    let mut previous_kind = None;
     for index in 0..lexed.len() {
         let kind = lexed.kind(index);
         let text = lexed.text(index);
-        // `SourceFile::parse` recurses on prefix-position tokens (`-x`, `!x`,
-        // `&x`, `*x`, `||`-closures, `return return ...`), which delimiter
-        // depth cannot bound. A long homogeneous run would overflow the parser
-        // stack (an abort, not an unwind), so cap runs at the same value as
-        // the post-parse syntax nesting limit before parsing ever starts.
+        // `SourceFile::parse` recurses on every prefix-position token (`-x`,
+        // `!x`, `&x`, `*x`, `||`-closures) and on the value-carrying keywords
+        // `return`/`break`, none of which delimiter depth can bound. Such a
+        // parser frame can stay live until the enclosing statement ends, so
+        // interleaved operands do not release it (`return 1_i64 - return ...`
+        // right-nests one frame per `return`). Cap the number of
+        // frame-opening tokens per statement at the syntax nesting limit,
+        // resetting only at `;`: a fatal parser stack overflow is an abort
+        // that `catch_unwind` cannot contain, so it must be prevented before
+        // parsing starts. Operators directly after an operand are in binary
+        // position, parse iteratively, and are exempt.
         if !matches!(kind, SyntaxKind::WHITESPACE | SyntaxKind::COMMENT) {
-            if matches!(
-                kind,
-                T![-] | T![!] | T![&] | T![|] | T![*] | T![return] | T![break]
-            ) {
-                prefix_run += 1;
-                if prefix_run > limits.max_syntax_depth {
+            if kind == T![;] {
+                prefix_nesting = 0;
+            } else if matches!(kind, T![return] | T![break])
+                || (matches!(kind, T![-] | T![!] | T![&] | T![|] | T![*])
+                    && !previous_kind.is_some_and(ends_operand))
+            {
+                prefix_nesting += 1;
+                if prefix_nesting > limits.max_syntax_depth {
                     return Err(error(
                         "prefix operator nesting limit exceeded",
                         lexed.text_range(index),
                     ));
                 }
-            } else {
-                prefix_run = 0;
             }
+            previous_kind = Some(kind);
         }
         if matches!(kind, T![&] | T![|]) {
             let paired_before = index > 0
@@ -75,6 +83,21 @@ pub(super) fn validate(source: &str, limits: ParseLimits) -> Result<(), Diagnost
         return Err(error("unclosed delimiter", range.clone()));
     }
     Ok(())
+}
+
+// A token that completes an operand: an operator directly after one of these
+// is in binary position and cannot open a prefix-expression parser frame.
+fn ends_operand(kind: SyntaxKind) -> bool {
+    matches!(
+        kind,
+        SyntaxKind::IDENT
+            | SyntaxKind::INT_NUMBER
+            | SyntaxKind::STRING
+            | T![true]
+            | T![false]
+            | T![')']
+            | T!['}']
+    )
 }
 
 fn close(
@@ -161,7 +184,10 @@ fn valid_integer(text: &str) -> bool {
     let Some(digits) = text.strip_suffix("_i64") else {
         return false;
     };
+    // Leading zeros are rejected so every admitted literal is already in
+    // canonical form and both subset emitters agree byte-for-byte.
     !digits.is_empty()
+        && (digits == "0" || !digits.starts_with('0'))
         && digits.bytes().all(|byte| byte.is_ascii_digit())
         && digits.parse::<i64>().is_ok()
 }
@@ -262,6 +288,51 @@ mod tests {
             "-".repeat(limits.max_syntax_depth + 1)
         );
         assert!(validate(&source, limits).is_err());
+    }
+
+    #[test]
+    fn bounds_interleaved_prefix_nesting_within_a_statement() {
+        // `return 1_i64 - return 1_i64 - ...` right-nests one parser frame
+        // per `return` even though the run of prefix tokens is never longer
+        // than two; a consecutive-run bound missed this and the parser
+        // aborted with a fatal stack overflow. The per-statement counter
+        // catches it because interleaved operands do not release the frames.
+        for unit in ["return 1_i64 - ", "break 1_i64 - ", "- return "] {
+            let source = format!("fn main() {{ let x = {}1_i64; }}", unit.repeat(9_000));
+            let error = validate(&source, ParseLimits::default()).unwrap_err();
+            assert_eq!(
+                error.message, "prefix operator nesting limit exceeded",
+                "{unit}"
+            );
+        }
+    }
+
+    #[test]
+    fn binary_position_operators_do_not_count_toward_prefix_nesting() {
+        // Left-associative binary chains parse iteratively; operators that
+        // directly follow an operand must not accumulate toward the bound,
+        // and `;` releases per-statement nesting.
+        let long_chain = "1_i64 - ".repeat(2_000);
+        let source = format!("fn main() {{ let x = {long_chain}1_i64; }}");
+        validate(&source, ParseLimits::default()).unwrap();
+
+        let many_statements = "let x = -1_i64; ".repeat(2_000);
+        let source = format!("fn main() {{ {many_statements} }}");
+        validate(&source, ParseLimits::default()).unwrap();
+
+        validate(
+            "fn negate(value: i64) -> i64 { 0_i64 - value } fn main() { negate(1_i64); }",
+            ParseLimits::default(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn rejects_leading_zero_integer_literals() {
+        assert!(validate("fn main() { 01_i64; }", ParseLimits::default()).is_err());
+        assert!(validate("fn main() { 007_i64; }", ParseLimits::default()).is_err());
+        validate("fn main() { 0_i64; }", ParseLimits::default()).unwrap();
+        validate("fn main() { 10_i64; }", ParseLimits::default()).unwrap();
     }
 
     #[test]

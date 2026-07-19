@@ -211,6 +211,15 @@ mod property_tests {
             let error = parse_error(crate::parse(&source, crate::ParseLimits::default()));
             assert_eq!(error.message, "prefix operator nesting limit exceeded");
         }
+        // Interleaved operands defeat a consecutive-run bound but still nest
+        // one parser frame per `return`; the per-statement counter must stop
+        // this before `SourceFile::parse` runs.
+        let source = format!(
+            "fn main() {{ let x = {}1_i64; }}",
+            "return 1_i64 - ".repeat(9_000)
+        );
+        let error = parse_error(crate::parse(&source, crate::ParseLimits::default()));
+        assert_eq!(error.message, "prefix operator nesting limit exceeded");
     }
 
     #[test]

@@ -129,12 +129,16 @@ span-insensitive structural comparison for testing.
 
 Default frontend limits (`ParseLimits`) are 1 MiB source, 100,000 lexer tokens,
 delimiter depth 256, 200,000 syntax elements, syntax/IR depth 256, 1,024
-functions, and 256 parameters per function. The token policy also caps runs of
-consecutive prefix-position tokens (`-`, `!`, `&`, `|`, `*`, `return`, `break`)
-at the syntax nesting limit ("prefix operator nesting limit exceeded"), because
-the parser recurses on them and a long run — for example 20,000 consecutive
-`-` — would otherwise overflow its stack before any post-parse depth check
-runs. Runtime defaults (`Limits { fuel, maximum_call_depth,
+functions, and 256 parameters per function. The token policy also caps the number of
+prefix-position tokens per statement (`-`, `!`, `&`, `|`, `*`, `return`,
+`break`; operators directly after an operand are binary position and exempt;
+`;` releases the count) at the syntax nesting limit ("prefix operator nesting
+limit exceeded"). Each such token can open a parser frame that survives until
+the statement ends, so both homogeneous runs (20,000 consecutive `-`) and
+interleaved forms (`return 1_i64 - return 1_i64 - ...`) would otherwise
+overflow the parser stack before any post-parse depth check runs. Integer
+literals additionally reject leading zeros so admitted literals are already
+canonical. Runtime defaults (`Limits { fuel, maximum_call_depth,
 maximum_output_bytes }`) are 1,000,000 fuel steps, 1,024 call frames, and 1 MiB
 stdout. Every statement/expression consumes fuel. Safeguard errors are resource
 decisions, not Rust semantics.
@@ -225,6 +229,10 @@ directories, created relative to the runner's working directory, containing orig
 syntax, metadata/reproduction commands, and every interpreter/compiler/native
 stream. The reducer emits type-preserving checked-IR candidates and keeps a
 smaller candidate only when replay preserves the original category.
+
+Timed-out subprocesses are killed and reaped through Unix process groups. On
+non-Unix hosts only the direct child is killed (no Job Object integration), so
+grandchildren may outlive the timeout until the capped reader drain expires.
 
 ## Tests and fuzzing
 

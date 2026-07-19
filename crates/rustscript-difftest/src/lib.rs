@@ -1084,6 +1084,10 @@ fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
     }
 }
 
+// Known limitation: without Unix process groups (Windows would need Job
+// Objects), only the direct child is killed; grandchildren it spawned may
+// outlive the timeout and hold the capture pipes open until the reader
+// drain deadline expires.
 #[cfg(not(unix))]
 fn terminate_process_tree(child: &mut Child) -> io::Result<()> {
     match child.try_wait()? {

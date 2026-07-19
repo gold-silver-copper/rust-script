@@ -510,6 +510,10 @@ impl Emitter<'_> {
     fn expression(&mut self, expression: &Expression, indent: usize) {
         match &expression.kind {
             ExpressionKind::Value(Value::I64(value)) => {
+                // Invariant: IR producers wrap negative constants in a Neg or
+                // Sub node (a bare `-3_i64` would reparse as Unary(Neg, 3) and
+                // break structural round trips).
+                debug_assert!(*value >= 0, "negative literal reached the emitter");
                 self.output.push_str(&value.to_string());
                 self.output.push_str("_i64");
             }
