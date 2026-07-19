@@ -35,7 +35,13 @@ impl ParsedProgram {
 
 pub(crate) fn parse(bytes: &[u8], limits: ParseLimits) -> Result<ParsedProgram, Diagnostic> {
     let source = bytes::validate(bytes, limits)?.to_owned();
-    lex_policy::validate(&source, limits)?;
+    // `LexedStr::new` runs third-party lexer code (its Edition 2024
+    // frontmatter probe on a leading `---` has panicked on the pinned
+    // release), so it is contained alongside the parser rather than left to
+    // unwind out of byte validation.
+    contain_unwind(Phase::Lex, "Rust lexer aborted", || {
+        lex_policy::validate(&source, limits)
+    })?;
 
     let file = parse_syntax(&source, limits)?;
     Ok(ParsedProgram {
@@ -64,16 +70,35 @@ fn parse_syntax_uncontained(
     Ok(file)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn parse_syntax(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
-    std::panic::catch_unwind(|| parse_syntax_uncontained(source, limits))
-        .map_err(|_| Diagnostic::new(Phase::Parse, "Rust parser aborted", None))
-        .and_then(std::convert::identity)
+    contain_unwind(Phase::Parse, "Rust parser aborted", || {
+        parse_syntax_uncontained(source, limits)
+    })
+}
+
+// On unwind-capable native targets, run third-party frontend code behind a
+// panic boundary and convert an unwind into a structured diagnostic. On
+// `wasm32-unknown-unknown` panics abort rather than unwind, so the browser
+// worker isolation boundary is the containment instead (see the README).
+#[cfg(not(target_arch = "wasm32"))]
+fn contain_unwind<T>(
+    phase: Phase,
+    message: &'static str,
+    operation: impl FnOnce() -> Result<T, Diagnostic> + std::panic::UnwindSafe,
+) -> Result<T, Diagnostic> {
+    match std::panic::catch_unwind(operation) {
+        Ok(result) => result,
+        Err(_) => Err(Diagnostic::new(phase, message, None)),
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
-fn parse_syntax(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
-    parse_syntax_uncontained(source, limits)
+fn contain_unwind<T>(
+    _phase: Phase,
+    _message: &'static str,
+    operation: impl FnOnce() -> Result<T, Diagnostic>,
+) -> Result<T, Diagnostic> {
+    operation()
 }
 
 fn validate_tree(file: &ast::SourceFile, limits: ParseLimits) -> Result<(), Diagnostic> {
@@ -200,6 +225,69 @@ mod property_tests {
             parameter_error.message,
             "unsupported parameter limit exceeded"
         );
+    }
+
+    #[test]
+    fn syntax_element_and_depth_boundaries_are_exact() {
+        use ra_ap_syntax::WalkEvent;
+
+        let source = "fn main() { 1_i64; }";
+        let parsed = crate::parse(source, crate::ParseLimits::default()).unwrap();
+        let mut elements = 0usize;
+        let mut depth = 0usize;
+        let mut deepest = 0usize;
+        for event in parsed.file().syntax().preorder_with_tokens() {
+            match event {
+                WalkEvent::Enter(_) => {
+                    elements += 1;
+                    depth += 1;
+                    deepest = deepest.max(depth);
+                }
+                WalkEvent::Leave(_) => depth -= 1,
+            }
+        }
+
+        let at_limit = crate::ParseLimits {
+            max_syntax_elements: elements,
+            max_syntax_depth: deepest,
+            ..crate::ParseLimits::default()
+        };
+        crate::parse(source, at_limit).expect("exact limits must accept");
+
+        let element_error = parse_error(crate::parse(
+            source,
+            crate::ParseLimits {
+                max_syntax_elements: elements - 1,
+                ..crate::ParseLimits::default()
+            },
+        ));
+        assert_eq!(element_error.message, "syntax element limit exceeded");
+
+        let depth_error = parse_error(crate::parse(
+            source,
+            crate::ParseLimits {
+                max_syntax_depth: deepest - 1,
+                ..crate::ParseLimits::default()
+            },
+        ));
+        assert_eq!(depth_error.message, "syntax nesting limit exceeded");
+    }
+
+    #[test]
+    fn leading_frontmatter_lexer_panic_is_contained() {
+        // Regression: `---...` triggers ra_ap_parser 0.0.342's Edition 2024
+        // frontmatter probe, which panics on a char boundary inside
+        // `LexedStr::new` — before the parser's own catch_unwind. Byte
+        // validation must return a diagnostic, never unwind.
+        for source in [
+            "---{|.y(---|a\n-",
+            "---\n",
+            "----------",
+            "---cargo\n---\nfn main() {}",
+        ] {
+            let result = crate::parse(source, crate::ParseLimits::default());
+            assert!(result.is_err(), "{source:?} must be rejected, not panic");
+        }
     }
 
     #[test]

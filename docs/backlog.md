@@ -8,17 +8,19 @@ Do not delete this file's structure.
 ## P2 — verification depth
 
 - [ ] Run a long `parser_bytes` fuzz campaign (hours, not `-runs=100`);
-      commit interesting corpus entries under `fuzz/corpus/parser_bytes/`
-      and minimize any finding into the regression corpus. This is the
-      highest-value unexecuted validation in the project.
+      minimize any finding into `fuzz/regressions/` (the committed home —
+      `fuzz/corpus/` is gitignored) with a category note. This is the
+      highest-value unexecuted validation in the project. Status: a
+      one-hour campaign is IN PROGRESS (2026-07-18); the first attempt
+      rediscovered the known `{#}` check_parser dependency panic within a
+      minute, so the target now guards that class (see
+      `docs/regression-corpus.md`).
 - [ ] Run a long `ast_roundtrip` campaign the same way.
 - [ ] Differential volume: run `rustscript-difftest` with several fresh
       seeds at `--cases 5000+`; record seeds tried (and results) here so
       seeds are not repeated: tried so far — seed 1 (×1000, ×200, ×100),
-      seed 7 (×100), seed 12345 (spot).
-- [ ] Exact-boundary limit tests: accept at exactly `max_tokens` /
-      delimiter depth 256 / syntax depth 256, reject at limit+1 (only the
-      prefix-nesting bound has these today).
+      seed 7 (×100), seed 12345 (spot), seed 424242 (×5000 IN PROGRESS
+      2026-07-18).
 - [ ] Property test that `format_program` output always reparses+rechecks
       to structurally equal IR for arbitrary *admitted* (not generated)
       sources harvested from the fuzz corpus.
@@ -52,6 +54,18 @@ Do not delete this file's structure.
 
 ## Done log
 
+- 2026-07-18 — **fuzz finding fixed**: a leading `---` drove
+  `ra_ap_parser`'s Edition 2024 frontmatter probe to panic inside
+  `LexedStr::new`, which ran in `lex_policy::validate` outside any panic
+  boundary — `parse_bytes` unwound instead of returning a diagnostic. The
+  lexer call is now contained by `contain_unwind` alongside the parser;
+  regression test and corpus entry added; fuzz target guards the known
+  dependency crash.
+- 2026-07-18 — exact-boundary limit tests for `max_tokens`, delimiter
+  depth, syntax elements, and syntax depth (accept at exactly N, reject
+  below); `parser_bytes` guards the known `{#}` check_parser panic class
+  so long fuzz campaigns are no longer blocked on the documented
+  dependency finding.
 - 2026-07-18 `651f64b`..`da09f51` — spec-conformance review round: prefix
   stack-overflow class fixed twice (homogeneous runs, then interleaved
   chains defeating the run counter), public API aligned to spec surface,

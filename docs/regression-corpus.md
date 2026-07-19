@@ -25,6 +25,7 @@ active fuzz corpus.
 | Cross-helper arithmetic growth | four helper layers each multiply an earlier result by `9_i64` five times | `overflowing_helper_chain_uses_the_safe_suitability_fallback` and the evaluator-backed generator filter |
 | Concurrent oracle timeout requests | cloned oracles request subprocess timeouts concurrently on Unix | serialized `try_wait` polling and `serializes_concurrent_timeout_waits` |
 | Dependency parser invariant | `{#}` reproduces a pinned `ra_ap_syntax::fuzz::check_parser` invariant panic for `0.0.342` | Documented dependency finding; product byte/token policy rejects `#` before parsing |
+| Dependency frontmatter lexer panic | A leading `---` drives `ra_ap_parser 0.0.342`'s Edition 2024 frontmatter probe to panic on a char boundary inside `LexedStr::new` (and inside `check_parser`), found by a 2026-07-18 `parser_bytes` campaign | Product path now contains the lexer unwind as a structured `Lex` diagnostic (`contain_unwind` in `crates/rustscript-core/src/frontend/mod.rs`); regression test `leading_frontmatter_lexer_panic_is_contained`; fuzz target skips `check_parser` for leading `---`; regression input `fuzz/regressions/parser_bytes/frontmatter_lexer_panic.txt` |
 | Dependency-recursion stack overflow on prefix-token nesting | Both homogeneous runs (20,000 consecutive `-`) and interleaved chains (`return 1_i64 - return 1_i64 - ...`, which defeat a consecutive-run counter) drove `SourceFile::parse` into a fatal stack-overflow abort | Lexical policy counts prefix-position tokens per statement (binary-position operators exempt, `;` resets) and rejects above the syntax nesting limit with "prefix operator nesting limit exceeded" before parsing; regression tests in `crates/rustscript-core/src/frontend/lex_policy.rs` and `crates/rustscript-core/src/frontend/mod.rs` |
 
 `wait-timeout 0.2.1` was removed from the oracle after this regression because
@@ -40,3 +41,11 @@ input bytes: {#}
 observed result: dependency invariant panic inside ra_ap_syntax::fuzz::check_parser
 rustscript product path: rejected as unsupported token `#` before SourceFile::parse
 ```
+
+The `parser_bytes` target now skips `check_parser` for inputs containing `#`
+so long campaigns are not permanently blocked on this known pinned-version
+crash (a 2026-07-18 one-hour campaign rediscovered it within a minute).
+Reproducing the panic therefore requires temporarily removing that guard in
+`fuzz/fuzz_targets/parser_bytes.rs`. On any rust-analyzer version bump:
+remove the guard, re-run the regression input, and either keep the guard
+(still panics) or delete it (fixed upstream).

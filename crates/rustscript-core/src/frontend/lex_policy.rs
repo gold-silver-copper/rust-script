@@ -328,6 +328,45 @@ mod tests {
     }
 
     #[test]
+    fn token_limit_boundary_is_exact() {
+        let source = "fn main() { 1_i64; }";
+        let count = LexedStr::new(Edition::Edition2024, source).len();
+        let at_limit = ParseLimits {
+            max_tokens: count,
+            ..ParseLimits::default()
+        };
+        validate(source, at_limit).unwrap();
+        let below_limit = ParseLimits {
+            max_tokens: count - 1,
+            ..ParseLimits::default()
+        };
+        assert_eq!(
+            validate(source, below_limit).unwrap_err().message,
+            "token limit exceeded"
+        );
+    }
+
+    #[test]
+    fn delimiter_depth_boundary_is_exact() {
+        // The signature parens close before the body brace opens, so the
+        // deepest simultaneous nesting is 1 brace + 4 parens = 5.
+        let source = "fn main() { ((((1_i64)))); }";
+        let at_limit = ParseLimits {
+            max_delimiter_depth: 5,
+            ..ParseLimits::default()
+        };
+        validate(source, at_limit).unwrap();
+        let below_limit = ParseLimits {
+            max_delimiter_depth: 4,
+            ..ParseLimits::default()
+        };
+        assert_eq!(
+            validate(source, below_limit).unwrap_err().message,
+            "delimiter nesting limit exceeded"
+        );
+    }
+
+    #[test]
     fn rejects_leading_zero_integer_literals() {
         assert!(validate("fn main() { 01_i64; }", ParseLimits::default()).is_err());
         assert!(validate("fn main() { 007_i64; }", ParseLimits::default()).is_err());
