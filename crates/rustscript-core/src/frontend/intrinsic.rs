@@ -11,7 +11,7 @@ use ra_ap_syntax::{
     AstNode, Edition, NodeOrToken, SourceFile, SyntaxKind, TextRange, TextSize, ast,
 };
 
-use crate::{Diagnostic, Limits, Phase};
+use crate::{Diagnostic, ParseLimits, Phase};
 
 const WRAPPER_PREFIX: &str = "fn __rustscript_intrinsic(){let __rustscript_value=(";
 const WRAPPER_SUFFIX: &str = ");}";
@@ -54,7 +54,7 @@ impl ExpressionRangeMap {
 
 pub(crate) fn print_expression(
     macro_expression: &ast::MacroExpr,
-    limits: Limits,
+    limits: ParseLimits,
 ) -> Result<PrintExpression, Diagnostic> {
     let call = macro_expression.macro_call().ok_or_else(|| {
         error(
@@ -227,18 +227,18 @@ fn element_range(element: &NodeOrToken<ast::TokenTree, ra_ap_syntax::SyntaxToken
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_wrapper(source: &str, limits: Limits) -> Result<ast::SourceFile, Diagnostic> {
+fn parse_wrapper(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
     std::panic::catch_unwind(|| parse_wrapper_uncontained(source, limits))
         .map_err(|_| Diagnostic::new(Phase::Parse, "Rust parser aborted", None))
         .and_then(std::convert::identity)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn parse_wrapper(source: &str, limits: Limits) -> Result<ast::SourceFile, Diagnostic> {
+fn parse_wrapper(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
     parse_wrapper_uncontained(source, limits)
 }
 
-fn parse_wrapper_uncontained(source: &str, limits: Limits) -> Result<ast::SourceFile, Diagnostic> {
+fn parse_wrapper_uncontained(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
     let parsed = SourceFile::parse(source, Edition::Edition2024);
     if !parsed.errors().is_empty() {
         return Err(Diagnostic::new(

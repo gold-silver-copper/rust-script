@@ -25,7 +25,7 @@ pub fn generate_checked_program(decisions: &[u64]) -> CheckedProgram {
 }
 
 fn candidate_is_suitable(candidate: &CheckedProgram) -> bool {
-    match crate::run(candidate, crate::RuntimeLimits::default()) {
+    match crate::run(candidate, crate::Limits::default()) {
         Ok(result) => {
             result.stdout.iter().filter(|byte| **byte == b'\n').count() <= MAX_OUTPUT_LINES
         }
@@ -1298,7 +1298,7 @@ impl StructuralExpressionMatch for Expression {
 #[cfg(test)]
 mod tests {
     use crate::checked_ir::{Block, CheckedProgram, Expression, ExpressionKind, Statement};
-    use crate::{Limits, RuntimeLimits, check_source, format, run};
+    use crate::{ParseLimits, Limits, check_source, format, run};
     use proptest::prelude::*;
 
     #[test]
@@ -1309,12 +1309,12 @@ mod tests {
                 .collect();
             let program = super::generate_checked_program(&decisions);
             let source = format(&program);
-            let reparsed = check_source(&source, Limits::default())
+            let reparsed = check_source(&source, ParseLimits::default())
                 .unwrap_or_else(|error| panic!("seed {seed} did not check: {error}\n{source}"));
             assert_program_statement_bound(&program, 8);
             assert!(program.structurally_eq(&reparsed), "seed {seed}\n{source}");
             assert_eq!(source, format(&reparsed), "seed {seed}");
-            let result = run(&reparsed, RuntimeLimits::default())
+            let result = run(&reparsed, Limits::default())
                 .unwrap_or_else(|error| panic!("seed {seed} trapped: {error}\n{source}"));
             assert!(!result.stdout.is_empty(), "seed {seed}");
             assert!(result.stdout.iter().filter(|byte| **byte == b'\n').count() <= 10);
@@ -1359,12 +1359,12 @@ mod tests {
         }
 
         let raw = super::Generator::new(&decisions).program();
-        let error = run(&raw, RuntimeLimits::default())
+        let error = run(&raw, Limits::default())
             .expect_err("constructed raw candidate must overflow");
-        assert_eq!(error.message, "integer arithmetic overflow");
+        assert_eq!(error.diagnostic.message, "integer arithmetic overflow");
 
         let filtered = super::generate_checked_program(&decisions);
-        let result = run(&filtered, RuntimeLimits::default())
+        let result = run(&filtered, Limits::default())
             .expect("public generator must return the nontrapping fallback");
         assert_eq!(result.stdout, b"0\nfalse\n");
         assert_eq!(filtered.functions.len(), 1);
@@ -1391,11 +1391,11 @@ mod tests {
             let generated = super::generate_checked_program(&decisions);
             assert_program_statement_bound(&generated, 8);
             let source = format(&generated);
-            let checked = check_source(&source, Limits::default())?;
+            let checked = check_source(&source, ParseLimits::default())?;
             prop_assert!(generated.structurally_eq(&checked));
             prop_assert_eq!(&source, &format(&checked));
-            let first = run(&checked, RuntimeLimits::default())?;
-            let second = run(&checked, RuntimeLimits::default())?;
+            let first = run(&checked, Limits::default())?;
+            let second = run(&checked, Limits::default())?;
             prop_assert_eq!(first, second);
         }
     }

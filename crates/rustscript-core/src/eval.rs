@@ -7,21 +7,21 @@ use crate::{CheckedProgram, Diagnostic, Phase, Value};
 /// Deterministic interpreter resource limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-pub struct RuntimeLimits {
+pub struct Limits {
     /// Maximum evaluator steps before execution stops.
     pub fuel: u64,
     /// Maximum nested function calls.
-    pub max_call_depth: usize,
+    pub maximum_call_depth: usize,
     /// Maximum stdout bytes retained by the interpreter.
-    pub max_output_bytes: usize,
+    pub maximum_output_bytes: usize,
 }
 
-impl Default for RuntimeLimits {
+impl Default for Limits {
     fn default() -> Self {
         Self {
             fuel: 1_000_000,
-            max_call_depth: 1_024,
-            max_output_bytes: 1024 * 1024,
+            maximum_call_depth: 1_024,
+            maximum_output_bytes: 1024 * 1024,
         }
     }
 }
@@ -36,8 +36,28 @@ pub struct RunResult {
     pub steps: u64,
 }
 
-/// Compatibility alias for the interpreter result.
-pub type Execution = RunResult;
+/// Structured runtime failure carrying the output produced before the fault.
+///
+/// Native execution writes its `println!` prefix before trapping, so the
+/// interpreter preserves the same partial stdout alongside the diagnostic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
+pub struct RuntimeDiagnostic {
+    /// The structured runtime diagnostic.
+    pub diagnostic: Diagnostic,
+    /// Exact stdout bytes produced before the failure.
+    pub stdout: Vec<u8>,
+    /// Evaluator steps consumed before the failure.
+    pub steps: u64,
+}
+
+impl std::fmt::Display for RuntimeDiagnostic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.diagnostic.fmt(formatter)
+    }
+}
+
+impl std::error::Error for RuntimeDiagnostic {}
 
 enum Control {
     Value(Value),
@@ -57,7 +77,7 @@ macro_rules! value_or_control {
 
 struct Evaluator<'a> {
     program: &'a CheckedProgram,
-    limits: RuntimeLimits,
+    limits: Limits,
     fuel: u64,
     output: Vec<u8>,
     call_depth: usize,
@@ -65,8 +85,8 @@ struct Evaluator<'a> {
 
 pub(crate) fn run(
     program: &CheckedProgram,
-    limits: RuntimeLimits,
-) -> Result<RunResult, Diagnostic> {
+    limits: Limits,
+) -> Result<RunResult, RuntimeDiagnostic> {
     let mut evaluator = Evaluator {
         program,
         limits,
@@ -74,14 +94,23 @@ pub(crate) fn run(
         output: Vec::new(),
         call_depth: 0,
     };
-    let value = evaluator.call(program.main, Vec::new(), None)?;
-    if value != Value::Unit {
-        return Err(runtime_error("main returned a non-unit value", None));
+    let outcome = match evaluator.call(program.main, Vec::new(), None) {
+        Ok(value) if value == Value::Unit => Ok(()),
+        Ok(_) => Err(runtime_error("main returned a non-unit value", None)),
+        Err(diagnostic) => Err(diagnostic),
+    };
+    let steps = limits.fuel - evaluator.fuel;
+    match outcome {
+        Ok(()) => Ok(RunResult {
+            stdout: evaluator.output,
+            steps,
+        }),
+        Err(diagnostic) => Err(RuntimeDiagnostic {
+            diagnostic,
+            stdout: evaluator.output,
+            steps,
+        }),
     }
-    Ok(RunResult {
-        stdout: evaluator.output,
-        steps: limits.fuel - evaluator.fuel,
-    })
 }
 
 impl Evaluator<'_> {
@@ -91,7 +120,7 @@ impl Evaluator<'_> {
         arguments: Vec<Value>,
         span: Option<TextRange>,
     ) -> Result<Value, Diagnostic> {
-        if self.call_depth >= self.limits.max_call_depth {
+        if self.call_depth >= self.limits.maximum_call_depth {
             return Err(runtime_error("call depth limit exceeded", span));
         }
         let function = self
@@ -358,7 +387,7 @@ impl Evaluator<'_> {
             .len()
             .checked_add(line.len())
             .ok_or_else(|| runtime_error("output byte limit exceeded", Some(span)))?;
-        if new_len > self.limits.max_output_bytes {
+        if new_len > self.limits.maximum_output_bytes {
             return Err(runtime_error("output byte limit exceeded", Some(span)));
         }
         self.output.extend_from_slice(&line);
@@ -404,13 +433,13 @@ fn runtime_error(message: &str, span: Option<TextRange>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Limits, RuntimeLimits, check_source, run};
+    use crate::{Limits, ParseLimits, check_source, run};
     use proptest::prelude::*;
 
-    fn execute(source: &str) -> Result<crate::Execution, crate::Diagnostic> {
+    fn execute(source: &str) -> Result<crate::RunResult, crate::RuntimeDiagnostic> {
         run(
-            &check_source(source, Limits::default()).unwrap(),
-            RuntimeLimits::default(),
+            &check_source(source, ParseLimits::default()).unwrap(),
+            Limits::default(),
         )
     }
 
@@ -427,31 +456,34 @@ mod tests {
     #[test]
     fn traps_arithmetic_and_fuel_exhaustion() {
         assert!(execute("fn main() { 9223372036854775807_i64 + 1_i64; }").is_err());
-        let program = check_source("fn main() { while true {} }", Limits::default()).unwrap();
+        let program = check_source("fn main() { while true {} }", ParseLimits::default()).unwrap();
         let error = run(
             &program,
-            RuntimeLimits {
+            Limits {
                 fuel: 10,
-                ..RuntimeLimits::default()
+                ..Limits::default()
             },
         )
         .unwrap_err();
-        assert_eq!(error.phase, crate::Phase::Runtime);
+        assert_eq!(error.diagnostic.phase, crate::Phase::Runtime);
 
         let program = check_source(
-            "fn main() { println!(\"{}\", 123_i64); }",
-            Limits::default(),
+            "fn main() { println!(\"{}\", 1_i64); println!(\"{}\", 234_i64); }",
+            ParseLimits::default(),
         )
         .unwrap();
         let error = run(
             &program,
-            RuntimeLimits {
-                max_output_bytes: 3,
-                ..RuntimeLimits::default()
+            Limits {
+                maximum_output_bytes: 2,
+                ..Limits::default()
             },
         )
         .unwrap_err();
-        assert_eq!(error.message, "output byte limit exceeded");
+        assert_eq!(error.diagnostic.message, "output byte limit exceeded");
+        // Output produced before the failing statement is preserved, matching
+        // the prefix a native binary would have written before trapping.
+        assert_eq!(error.stdout, b"1\n");
     }
 
     proptest! {
@@ -466,19 +498,17 @@ mod tests {
                 "fn main() { while true {} }",
                 "fn main() { println!(\"{}\", true); }",
             ][case];
-            let checked = check_source(source, Limits::default())?;
+            let checked = check_source(source, ParseLimits::default())?;
             let limits = if case == 3 {
-                RuntimeLimits { fuel: 16, ..RuntimeLimits::default() }
+                Limits { fuel: 16, ..Limits::default() }
             } else if case == 4 {
-                RuntimeLimits { max_output_bytes: 1, ..RuntimeLimits::default() }
+                Limits { maximum_output_bytes: 1, ..Limits::default() }
             } else {
-                RuntimeLimits::default()
+                Limits::default()
             };
             let first = run(&checked, limits).unwrap_err();
             let second = run(&checked, limits).unwrap_err();
-            prop_assert_eq!(first.phase, second.phase);
-            prop_assert_eq!(first.message, second.message);
-            prop_assert_eq!(first.span, second.span);
+            prop_assert_eq!(first, second);
         }
     }
 }

@@ -1,8 +1,8 @@
 use ra_ap_parser::{Edition, LexedStr, SyntaxKind, T};
 
-use crate::{Diagnostic, Limits, Phase, Span};
+use crate::{Diagnostic, ParseLimits, Phase, Span};
 
-pub(super) fn validate(source: &str, limits: Limits) -> Result<(), Diagnostic> {
+pub(super) fn validate(source: &str, limits: ParseLimits) -> Result<(), Diagnostic> {
     let lexed = LexedStr::new(Edition::Edition2024, source);
     if lexed.len() > limits.max_tokens {
         return Err(error(
@@ -185,15 +185,15 @@ mod tests {
     fn accepts_profile_tokens() {
         validate(
             "fn main() { // hi\n println!(\"{}\", 42_i64); }",
-            Limits::default(),
+            ParseLimits::default(),
         )
         .unwrap();
     }
 
     #[test]
     fn rejects_raw_identifier_and_block_comment() {
-        assert!(validate("fn r#main() {}", Limits::default()).is_err());
-        assert!(validate("fn main() { /* no */ }", Limits::default()).is_err());
+        assert!(validate("fn r#main() {}", ParseLimits::default()).is_err());
+        assert!(validate("fn main() { /* no */ }", ParseLimits::default()).is_err());
     }
 
     #[test]
@@ -202,10 +202,10 @@ mod tests {
             "fn main() { //// ordinary\n}",
             "fn main() { ////! ordinary\n}",
         ] {
-            validate(source, Limits::default()).unwrap();
+            validate(source, ParseLimits::default()).unwrap();
         }
         for source in ["fn main() { /// docs\n}", "fn main() { //! docs\n}"] {
-            assert!(validate(source, Limits::default()).is_err());
+            assert!(validate(source, ParseLimits::default()).is_err());
         }
     }
 
@@ -217,14 +217,14 @@ mod tests {
             "fn main(){0x1_i64;}",
             "fn main(){\"x\";}",
         ] {
-            assert!(validate(source, Limits::default()).is_err(), "{source}");
+            assert!(validate(source, ParseLimits::default()).is_err(), "{source}");
         }
     }
 
     #[test]
     fn propagates_lexed_str_error_ranges() {
         let source = "fn main() { \"unterminated }";
-        let error = validate(source, Limits::default()).unwrap_err();
+        let error = validate(source, ParseLimits::default()).unwrap_err();
         let start = source.find('"').expect("string start");
         assert_eq!(
             error.span,
@@ -241,14 +241,14 @@ mod tests {
         // the parser stack (a process abort `catch_unwind` cannot contain).
         for operator in ["-", "!", "&", "|", "*", "return ", "break "] {
             let source = format!("fn main() {{ let x = {}1_i64; }}", operator.repeat(20_000));
-            let error = validate(&source, Limits::default()).unwrap_err();
+            let error = validate(&source, ParseLimits::default()).unwrap_err();
             assert_eq!(error.message, "prefix operator nesting limit exceeded");
         }
     }
 
     #[test]
     fn allows_prefix_runs_up_to_the_nesting_limit() {
-        let limits = Limits::default();
+        let limits = ParseLimits::default();
         let source = format!(
             "fn main() {{ let x = {}1_i64; }}",
             "-".repeat(limits.max_syntax_depth)
@@ -265,7 +265,7 @@ mod tests {
     fn rejects_non_profile_ascii_whitespace() {
         for whitespace in ['\u{000b}', '\u{000c}'] {
             let source = format!("fn{whitespace}main() {{}}");
-            assert!(validate(&source, Limits::default()).is_err(), "{source:?}");
+            assert!(validate(&source, ParseLimits::default()).is_err(), "{source:?}");
         }
     }
 }

@@ -10,7 +10,7 @@ use crate::checked_ir::{
     Block, CheckedProgram, Expression, ExpressionKind, Function, FunctionId, LocalId, Parameter,
     Statement,
 };
-use crate::{Diagnostic, Limits, ParsedProgram, Phase, Type, Value};
+use crate::{Diagnostic, ParseLimits, ParsedProgram, Phase, Type, Value};
 
 struct Signature {
     name: SmolStr,
@@ -93,7 +93,7 @@ struct BodyChecker<'a> {
     signature: &'a Signature,
     signatures: &'a [Signature],
     function_names: &'a HashMap<SmolStr, FunctionId>,
-    limits: Limits,
+    limits: ParseLimits,
     scopes: Vec<HashMap<SmolStr, Binding>>,
     next_local: usize,
     loop_depth: usize,
@@ -104,7 +104,7 @@ impl<'a> BodyChecker<'a> {
         signature: &'a Signature,
         signatures: &'a [Signature],
         function_names: &'a HashMap<SmolStr, FunctionId>,
-        limits: Limits,
+        limits: ParseLimits,
     ) -> Self {
         let scope = signature
             .parameters
@@ -1056,17 +1056,17 @@ fn type_error(message: &str, node: &ra_ap_syntax::SyntaxNode) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Limits, check_source};
+    use crate::{ParseLimits, check_source};
 
     #[test]
     fn checks_empty_main() {
-        assert!(check_source("fn main() {}", Limits::default()).is_ok());
+        assert!(check_source("fn main() {}", ParseLimits::default()).is_ok());
     }
 
     #[test]
     fn collects_forward_and_recursive_signatures() {
-        assert!(check_source("fn a(x: i64) -> i64 {} fn main() {}", Limits::default()).is_err());
-        assert!(check_source("fn a(x: i64) {} fn main() {}", Limits::default()).is_ok());
+        assert!(check_source("fn a(x: i64) -> i64 {} fn main() {}", ParseLimits::default()).is_err());
+        assert!(check_source("fn a(x: i64) {} fn main() {}", ParseLimits::default()).is_ok());
     }
 
     #[test]
@@ -1080,7 +1080,7 @@ mod tests {
             "fn f(main: i64) {} fn main() {}",
             "fn f(x: u64) {} fn main() {}",
         ] {
-            assert!(check_source(source, Limits::default()).is_err(), "{source}");
+            assert!(check_source(source, ParseLimits::default()).is_err(), "{source}");
         }
     }
 
@@ -1099,7 +1099,7 @@ fn main() {
     }
 }
 "#;
-        check_source(source, Limits::default()).unwrap();
+        check_source(source, ParseLimits::default()).unwrap();
     }
 
     #[test]
@@ -1114,7 +1114,7 @@ fn main() {
             "fn main() { if true { 1_i64 } else { false }; }",
             "fn main() { let x = 1_i64 < 2_i64 < 3_i64; }",
         ] {
-            assert!(check_source(source, Limits::default()).is_err(), "{source}");
+            assert!(check_source(source, ParseLimits::default()).is_err(), "{source}");
         }
     }
 }

@@ -79,7 +79,7 @@ fn commands_follow_stdout_and_exit_contracts() {
     let expected = rustscript_core::format(
         &rustscript_core::check_source(
             include_str!("../../../examples/arithmetic.rs"),
-            rustscript_core::Limits::default(),
+            rustscript_core::ParseLimits::default(),
         )
         .expect("example checks"),
     );
@@ -120,7 +120,7 @@ fn source_errors_exit_one_and_usage_errors_exit_two() {
     assert!(invalid_utf8.stdout.is_empty());
     assert!(String::from_utf8_lossy(&invalid_utf8.stderr).contains("not valid UTF-8"));
 
-    let oversized = vec![b' '; rustscript_core::Limits::default().max_source_bytes + 2];
+    let oversized = vec![b' '; rustscript_core::ParseLimits::default().max_source_bytes + 2];
     let (_directory, oversized) = source_file_bytes(&oversized);
     let oversized = Command::new(binary())
         .args(["check", oversized.to_str().expect("UTF-8 path")])

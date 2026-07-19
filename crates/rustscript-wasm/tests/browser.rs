@@ -83,22 +83,22 @@ async fn browser_host_reports_worker_abort_and_replaces_worker() {
 
 #[derive(serde::Serialize)]
 struct Options {
-    runtime: RuntimeLimits,
+    runtime: Limits,
 }
 
 #[derive(serde::Serialize)]
-struct RuntimeLimits {
+struct Limits {
     fuel: u64,
-    max_call_depth: usize,
-    max_output_bytes: usize,
+    maximum_call_depth: usize,
+    maximum_output_bytes: usize,
 }
 
 fn output_limit_options() -> Options {
     Options {
-        runtime: RuntimeLimits {
+        runtime: Limits {
             fuel: 1_000_000,
-            max_call_depth: 1_024,
-            max_output_bytes: 1,
+            maximum_call_depth: 1_024,
+            maximum_output_bytes: 1,
         },
     }
 }

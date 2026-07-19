@@ -1,16 +1,16 @@
 #![forbid(unsafe_code)]
 #![doc = "WASM adapter for the rustscript semantic engine."]
 
-use rustscript_core::{Diagnostic, Limits, Location, RuntimeLimits};
+use rustscript_core::{Diagnostic, ParseLimits, Location, Limits};
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 #[derive(Clone, Copy, Deserialize, Serialize, Default)]
 struct Options {
     #[serde(default)]
-    frontend: Limits,
+    frontend: ParseLimits,
     #[serde(default)]
-    runtime: RuntimeLimits,
+    runtime: Limits,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -53,6 +53,21 @@ impl Response {
             text: None,
             error: Some(WasmDiagnostic {
                 diagnostic,
+                location,
+            }),
+        }
+    }
+
+    /// A runtime failure keeps the partial stdout and step count produced
+    /// before the fault, matching native prefix output before a trap.
+    fn runtime_failure(location: Option<Location>, failure: rustscript_core::RuntimeDiagnostic) -> Self {
+        Self {
+            ok: false,
+            output: Some(failure.stdout),
+            steps: Some(failure.steps),
+            text: None,
+            error: Some(WasmDiagnostic {
+                diagnostic: failure.diagnostic,
                 location,
             }),
         }
@@ -136,7 +151,10 @@ fn respond(source: &str, options: JsValue, operation: Operation) -> Result<JsVal
                         Ok(execution) => {
                             Response::success(None, Some(execution.stdout), Some(execution.steps))
                         }
-                        Err(error) => Response::failure(parsed.location(&error), error),
+                        Err(failure) => {
+                            let location = parsed.location(&failure.diagnostic);
+                            Response::runtime_failure(location, failure)
+                        }
                     },
                     Operation::Ast => {
                         Response::success(Some(rustscript_core::debug_syntax(&parsed)), None, None)
@@ -218,10 +236,10 @@ mod tests {
         assert_eq!(diagnostic.location, Some(Location { line: 2, column: 2 }));
 
         let fuel_options = serde_wasm_bindgen::to_value(&Options {
-            frontend: Limits::default(),
-            runtime: RuntimeLimits {
+            frontend: ParseLimits::default(),
+            runtime: Limits {
                 fuel: 8,
-                ..RuntimeLimits::default()
+                ..Limits::default()
             },
         })
         .unwrap();
@@ -232,10 +250,10 @@ mod tests {
         );
 
         let output_options = serde_wasm_bindgen::to_value(&Options {
-            frontend: Limits::default(),
-            runtime: RuntimeLimits {
-                max_output_bytes: 1,
-                ..RuntimeLimits::default()
+            frontend: ParseLimits::default(),
+            runtime: Limits {
+                maximum_output_bytes: 1,
+                ..Limits::default()
             },
         })
         .unwrap();

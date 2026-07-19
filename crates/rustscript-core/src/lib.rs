@@ -15,25 +15,19 @@ mod typeck;
 
 pub use checked_ir::{CheckedProgram, Type, Value};
 pub use diagnostic::{Diagnostic, Location, Phase, Span};
-pub use eval::{Execution, RunResult, RuntimeLimits};
+pub use eval::{Limits, RunResult, RuntimeDiagnostic};
 pub use frontend::ParsedProgram;
 #[cfg(feature = "generator-support")]
 pub use generator_support::{generate_checked_program, reduction_candidates};
-pub use limits::Limits;
-
-/// Frontend resource limits used by [`parse`] and [`parse_bytes`].
-pub type ParseLimits = Limits;
-
-/// Structured runtime failure returned by [`run`].
-pub type RuntimeDiagnostic = Diagnostic;
+pub use limits::ParseLimits;
 
 /// Validate and parse UTF-8 source using the strict rustscript profile.
-pub fn parse(source: &str, limits: Limits) -> Result<ParsedProgram, Diagnostic> {
+pub fn parse(source: &str, limits: ParseLimits) -> Result<ParsedProgram, Diagnostic> {
     frontend::parse(source.as_bytes(), limits)
 }
 
 /// Validate and parse source bytes, reporting invalid UTF-8 as a diagnostic.
-pub fn parse_bytes(source: &[u8], limits: Limits) -> Result<ParsedProgram, Diagnostic> {
+pub fn parse_bytes(source: &[u8], limits: ParseLimits) -> Result<ParsedProgram, Diagnostic> {
     frontend::parse(source, limits)
 }
 
@@ -43,12 +37,12 @@ pub fn check(parsed: &ParsedProgram) -> Result<CheckedProgram, Vec<Diagnostic>> 
 }
 
 /// Parse and type-check source in one operation.
-pub fn check_source(source: &str, limits: Limits) -> Result<CheckedProgram, Diagnostic> {
+pub fn check_source(source: &str, limits: ParseLimits) -> Result<CheckedProgram, Diagnostic> {
     typeck::check(&parse(source, limits)?)
 }
 
 /// Execute a checked program with deterministic safeguards.
-pub fn run(program: &CheckedProgram, limits: RuntimeLimits) -> Result<Execution, Diagnostic> {
+pub fn run(program: &CheckedProgram, limits: Limits) -> Result<RunResult, RuntimeDiagnostic> {
     eval::run(program, limits)
 }
 

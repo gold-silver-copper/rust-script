@@ -3,7 +3,7 @@
 /// Configurable frontend resource limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
-pub struct Limits {
+pub struct ParseLimits {
     /// Maximum input bytes accepted before UTF-8 validation.
     pub max_source_bytes: usize,
     /// Maximum `ra_ap_parser::LexedStr` tokens accepted before parsing.
@@ -20,7 +20,7 @@ pub struct Limits {
     pub max_parameters: usize,
 }
 
-impl Default for Limits {
+impl Default for ParseLimits {
     fn default() -> Self {
         Self {
             max_source_bytes: 1024 * 1024,

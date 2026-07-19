@@ -6,7 +6,7 @@ mod lex_policy;
 use line_index::LineIndex;
 use ra_ap_syntax::{AstNode, Edition, SourceFile, SyntaxKind, WalkEvent, ast};
 
-use crate::{Diagnostic, Limits, Phase};
+use crate::{Diagnostic, ParseLimits, Phase};
 
 /// Opaque owner of validated source and its rust-analyzer syntax tree.
 ///
@@ -16,7 +16,7 @@ use crate::{Diagnostic, Limits, Phase};
 pub struct ParsedProgram {
     file: ast::SourceFile,
     line_index: LineIndex,
-    limits: Limits,
+    limits: ParseLimits,
 }
 
 impl ParsedProgram {
@@ -28,12 +28,12 @@ impl ParsedProgram {
     pub(crate) fn file(&self) -> &ast::SourceFile {
         &self.file
     }
-    pub(crate) fn limits(&self) -> Limits {
+    pub(crate) fn limits(&self) -> ParseLimits {
         self.limits
     }
 }
 
-pub(crate) fn parse(bytes: &[u8], limits: Limits) -> Result<ParsedProgram, Diagnostic> {
+pub(crate) fn parse(bytes: &[u8], limits: ParseLimits) -> Result<ParsedProgram, Diagnostic> {
     let source = bytes::validate(bytes, limits)?.to_owned();
     lex_policy::validate(&source, limits)?;
 
@@ -45,7 +45,7 @@ pub(crate) fn parse(bytes: &[u8], limits: Limits) -> Result<ParsedProgram, Diagn
     })
 }
 
-fn parse_syntax_uncontained(source: &str, limits: Limits) -> Result<ast::SourceFile, Diagnostic> {
+fn parse_syntax_uncontained(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
     let parsed = SourceFile::parse(source, Edition::Edition2024);
     if let Some(error) = parsed.errors().first() {
         return Err(Diagnostic::new(
@@ -62,18 +62,18 @@ fn parse_syntax_uncontained(source: &str, limits: Limits) -> Result<ast::SourceF
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_syntax(source: &str, limits: Limits) -> Result<ast::SourceFile, Diagnostic> {
+fn parse_syntax(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
     std::panic::catch_unwind(|| parse_syntax_uncontained(source, limits))
         .map_err(|_| Diagnostic::new(Phase::Parse, "Rust parser aborted", None))
         .and_then(std::convert::identity)
 }
 
 #[cfg(target_arch = "wasm32")]
-fn parse_syntax(source: &str, limits: Limits) -> Result<ast::SourceFile, Diagnostic> {
+fn parse_syntax(source: &str, limits: ParseLimits) -> Result<ast::SourceFile, Diagnostic> {
     parse_syntax_uncontained(source, limits)
 }
 
-fn validate_tree(file: &ast::SourceFile, limits: Limits) -> Result<(), Diagnostic> {
+fn validate_tree(file: &ast::SourceFile, limits: ParseLimits) -> Result<(), Diagnostic> {
     let root = file.syntax();
     let mut elements = 0usize;
     let mut depth = 0usize;
@@ -121,12 +121,12 @@ mod property_tests {
 
         #[test]
         fn byte_frontend_terminates(data in prop::collection::vec(any::<u8>(), 0..4096)) {
-            let _ = crate::parse_bytes(&data, crate::Limits::default());
+            let _ = crate::parse_bytes(&data, crate::ParseLimits::default());
         }
 
         #[test]
         fn ascii_parse_admission_terminates(data in prop::collection::vec(0_u8..=127, 0..4096)) {
-            let _ = crate::parse_bytes(&data, crate::Limits::default());
+            let _ = crate::parse_bytes(&data, crate::ParseLimits::default());
         }
     }
 
@@ -134,7 +134,7 @@ mod property_tests {
     fn rust_analyzer_operator_tree_defines_precedence() {
         let parsed = crate::parse(
             "fn main() { let x = 1_i64 + 2_i64 * 3_i64; let y = false || true && false; }",
-            crate::Limits::default(),
+            crate::ParseLimits::default(),
         )
         .expect("operator sample must parse");
         let binaries: Vec<_> = parsed
@@ -167,18 +167,18 @@ mod property_tests {
     fn enforces_syntax_function_and_parameter_limits() {
         let syntax_error = parse_error(crate::parse(
             "fn main() {}",
-            crate::Limits {
+            crate::ParseLimits {
                 max_syntax_elements: 1,
-                ..crate::Limits::default()
+                ..crate::ParseLimits::default()
             },
         ));
         assert_eq!(syntax_error.message, "syntax element limit exceeded");
 
         let function_error = parse_error(crate::parse(
             "fn a() {} fn main() {}",
-            crate::Limits {
+            crate::ParseLimits {
                 max_functions: 1,
-                ..crate::Limits::default()
+                ..crate::ParseLimits::default()
             },
         ));
         assert_eq!(
@@ -188,9 +188,9 @@ mod property_tests {
 
         let parameter_error = parse_error(crate::parse(
             "fn helper(a: i64, b: i64) {} fn main() {}",
-            crate::Limits {
+            crate::ParseLimits {
                 max_parameters: 1,
-                ..crate::Limits::default()
+                ..crate::ParseLimits::default()
             },
         ));
         assert_eq!(
@@ -205,7 +205,7 @@ mod property_tests {
         // recurses itself into a fatal (non-unwinding) stack overflow.
         for operator in ["-", "!", "&", "*"] {
             let source = format!("fn main() {{ let x = {}1_i64; }}", operator.repeat(50_000));
-            let error = parse_error(crate::parse(&source, crate::Limits::default()));
+            let error = parse_error(crate::parse(&source, crate::ParseLimits::default()));
             assert_eq!(error.message, "prefix operator nesting limit exceeded");
         }
     }

@@ -10,7 +10,6 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4.13"
-arbitrary = "1.4.2"
 ra_ap_syntax = "=0.0.342"
 rustscript-core = { path = "../crates/rustscript-core", features = ["generator-support"] }
 

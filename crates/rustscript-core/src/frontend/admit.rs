@@ -4,9 +4,9 @@ use ra_ap_syntax::ast::{
 };
 use ra_ap_syntax::{AstNode, SyntaxKind, ast};
 
-use crate::{Diagnostic, Limits, Phase};
+use crate::{Diagnostic, ParseLimits, Phase};
 
-pub(super) fn validate(file: &ast::SourceFile, limits: Limits) -> Result<(), Diagnostic> {
+pub(super) fn validate(file: &ast::SourceFile, limits: ParseLimits) -> Result<(), Diagnostic> {
     let mut functions = 0usize;
     for item in file.items() {
         let ast::Item::Fn(function) = item else {
@@ -22,7 +22,7 @@ pub(super) fn validate(file: &ast::SourceFile, limits: Limits) -> Result<(), Dia
     validate_descendants(file.syntax(), limits)
 }
 
-fn validate_descendants(root: &ra_ap_syntax::SyntaxNode, limits: Limits) -> Result<(), Diagnostic> {
+fn validate_descendants(root: &ra_ap_syntax::SyntaxNode, limits: ParseLimits) -> Result<(), Diagnostic> {
     // rust-analyzer does not expose empty statements as an `ast::Stmt` variant.
     // The subset has no empty statement, so reject semicolons not owned by one
     // of the two statement nodes that can legally contain them.
@@ -332,7 +332,7 @@ fn bare_path_name(path: &ast::Path) -> Option<String> {
     Some(segment.name_ref()?.text().to_string())
 }
 
-fn validate_function(function: &ast::Fn, limits: Limits) -> Result<(), Diagnostic> {
+fn validate_function(function: &ast::Fn, limits: ParseLimits) -> Result<(), Diagnostic> {
     if function.attrs().next().is_some()
         || function.generic_param_list().is_some()
         || function.where_clause().is_some()
@@ -408,13 +408,13 @@ fn unsupported_range(what: &str, range: ra_ap_syntax::TextRange) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Limits, parse};
+    use crate::{ParseLimits, parse};
 
     #[test]
     fn accepts_supported_typed_shapes() {
         parse(
             "fn unit() -> () { return; } fn main() { let mut x: i64 = 1_i64; while x < 2_i64 { x = x + 1_i64; } let y = if true { x } else { 0_i64 }; { y; }; unit(); }",
-            Limits::default(),
+            ParseLimits::default(),
         )
         .unwrap();
     }
@@ -440,7 +440,7 @@ mod tests {
             "fn main() { if true { () } else { () } let x = 1_i64; }",
             "fn main() { ; }",
         ] {
-            assert!(parse(source, Limits::default()).is_err(), "{source}");
+            assert!(parse(source, ParseLimits::default()).is_err(), "{source}");
         }
     }
 }

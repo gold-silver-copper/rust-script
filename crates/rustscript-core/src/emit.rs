@@ -5,7 +5,7 @@ use ra_ap_syntax::ast::{
 use ra_ap_syntax::{AstToken, ast};
 
 use crate::checked_ir::{Block, Expression, ExpressionKind, Function, Statement};
-use crate::{CheckedProgram, Limits, ParsedProgram, Type, Value};
+use crate::{CheckedProgram, ParseLimits, ParsedProgram, Type, Value};
 
 pub(crate) fn format(program: &CheckedProgram) -> String {
     let mut emitter = Emitter {
@@ -40,7 +40,7 @@ pub(crate) fn format_parsed(program: &ParsedProgram) -> String {
 
 struct SyntaxEmitter {
     output: String,
-    limits: Limits,
+    limits: ParseLimits,
 }
 
 impl SyntaxEmitter {
@@ -652,13 +652,13 @@ fn for_invalid_id(output: &mut String, invalid: bool) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Limits, check_source, format};
+    use crate::{ParseLimits, check_source, format};
 
     #[test]
     fn canonical_output_is_idempotent() {
         let source = "fn add(x:i64,y:i64)->i64{x+y} fn main(){let mut x=add(1_i64,2_i64);while x<4_i64{x=x+1_i64;} if x==4_i64 {()} else {()};}";
-        let first = format(&check_source(source, Limits::default()).unwrap());
-        let second = format(&check_source(&first, Limits::default()).unwrap());
+        let first = format(&check_source(source, ParseLimits::default()).unwrap());
+        let second = format(&check_source(&first, ParseLimits::default()).unwrap());
         assert_eq!(first, second);
     }
 }

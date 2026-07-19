@@ -32,7 +32,7 @@ fn run(arguments: Arguments) -> Result<(), String> {
     let oracle = RustcOracle::discover(arguments.rustc);
     let artifact_root = PathBuf::from("artifacts/differential");
     if let Some(path) = arguments.replay {
-        let bytes = read_bounded(&path, rustscript_core::Limits::default().max_source_bytes)
+        let bytes = read_bounded(&path, rustscript_core::ParseLimits::default().max_source_bytes)
             .map_err(|error| format!("{}: {error}", path.display()))?;
         let source = String::from_utf8(bytes)
             .map_err(|_| format!("{} is not valid UTF-8", path.display()))?;

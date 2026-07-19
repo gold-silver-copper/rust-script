@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use rustscript_core::{Limits, RuntimeLimits, check_source, run};
+use rustscript_core::{ParseLimits, Limits, check_source, run};
 
 const EXAMPLES: &[(&str, &str, &[u8])] = &[
     (
@@ -34,9 +34,9 @@ const EXAMPLES: &[(&str, &str, &[u8])] = &[
 #[test]
 fn normative_examples_produce_exact_stdout() {
     for (name, source, expected) in EXAMPLES {
-        let program = check_source(source, Limits::default())
+        let program = check_source(source, ParseLimits::default())
             .unwrap_or_else(|error| panic!("{name} did not check: {error}"));
-        let result = run(&program, RuntimeLimits::default())
+        let result = run(&program, Limits::default())
             .unwrap_or_else(|error| panic!("{name} did not run: {error}"));
         assert_eq!(&result.stdout, expected, "{name}");
     }

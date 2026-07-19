@@ -4,12 +4,20 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let limits = rustscript_core::Limits {
+    let limits = rustscript_core::ParseLimits {
         max_source_bytes: 64 * 1024,
         max_tokens: 10_000,
         max_syntax_elements: 20_000,
-        ..rustscript_core::Limits::default()
+        ..rustscript_core::ParseLimits::default()
     };
+    // Exercise rust-analyzer's own tree invariants on every bounded, valid
+    // UTF-8 input — including non-ASCII text that rustscript itself rejects.
+    // A panic here is a dependency fuzz finding.
+    if let Ok(text) = std::str::from_utf8(data)
+        && text.len() <= limits.max_source_bytes
+    {
+        ra_ap_syntax::fuzz::check_parser(text);
+    }
     if data.len() > limits.max_source_bytes
         || std::str::from_utf8(data).is_err()
         || data.iter().any(|byte| !byte.is_ascii())
@@ -17,17 +25,12 @@ fuzz_target!(|data: &[u8]| {
         assert!(rustscript_core::parse_bytes(data, limits).is_err());
         return;
     }
-    if let Ok(text) = std::str::from_utf8(data)
-        && text.len() <= limits.max_source_bytes
-    {
-        ra_ap_syntax::fuzz::check_parser(text);
-    }
     let Ok(parsed) = rustscript_core::parse_bytes(data, limits) else {
         return;
     };
     let parsed_canonical = rustscript_core::format_program(&parsed);
     let parsed_round_trip =
-        rustscript_core::parse(&parsed_canonical, rustscript_core::Limits::default())
+        rustscript_core::parse(&parsed_canonical, rustscript_core::ParseLimits::default())
             .expect("canonical parsed program must reparse");
     assert_eq!(
         parsed_canonical,
@@ -44,10 +47,10 @@ fuzz_target!(|data: &[u8]| {
         .expect("canonical checked IR must reparse");
     assert!(checked.structurally_eq(&reparsed));
     assert_eq!(canonical, rustscript_core::format(&reparsed));
-    let runtime = rustscript_core::RuntimeLimits {
+    let runtime = rustscript_core::Limits {
         fuel: 10_000,
-        max_call_depth: 32,
-        max_output_bytes: 4096,
+        maximum_call_depth: 32,
+        maximum_output_bytes: 4096,
     };
     let _ = rustscript_core::run(&reparsed, runtime);
 });

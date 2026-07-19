@@ -1,6 +1,6 @@
-use crate::{Diagnostic, Limits, Phase, Span};
+use crate::{Diagnostic, ParseLimits, Phase, Span};
 
-pub(super) fn validate(bytes: &[u8], limits: Limits) -> Result<&str, Diagnostic> {
+pub(super) fn validate(bytes: &[u8], limits: ParseLimits) -> Result<&str, Diagnostic> {
     if bytes.len() > limits.max_source_bytes {
         return Err(Diagnostic::new(
             Phase::Lex,
@@ -43,14 +43,14 @@ mod tests {
 
     #[test]
     fn rejects_invalid_utf8() {
-        let error = validate(&[0xff], Limits::default()).unwrap_err();
+        let error = validate(&[0xff], ParseLimits::default()).unwrap_err();
         assert_eq!(error.phase, Phase::Lex);
         assert_eq!(error.span, Some(Span { start: 0, end: 1 }));
     }
 
     #[test]
     fn rejects_non_ascii() {
-        let error = validate("é".as_bytes(), Limits::default()).unwrap_err();
+        let error = validate("é".as_bytes(), ParseLimits::default()).unwrap_err();
         assert_eq!(error.span, Some(Span { start: 0, end: 2 }));
     }
 }

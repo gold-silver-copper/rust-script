@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use rustscript_core::{
-    Diagnostic, Limits, ParsedProgram, Phase, RuntimeLimits, check, check_source, format_program,
+    Diagnostic, ParseLimits, ParsedProgram, Phase, Limits, check, check_source, format_program,
     parse, parse_bytes, run,
 };
 
@@ -27,7 +27,7 @@ fn supported_profile_constructs_check() {
         "fn early(value: bool) -> i64 { if value { return 1_i64; } else { () }; 2_i64 } fn main() { println!(\"{}\", early(true)); }",
     ];
     for source in valid {
-        assert!(check_source(source, Limits::default()).is_ok(), "{source}");
+        assert!(check_source(source, ParseLimits::default()).is_ok(), "{source}");
     }
 }
 
@@ -46,7 +46,7 @@ fn required_rejection_corpus_is_rejected_with_spans() {
         "fn main() { let value: i64 = if true { 1_i64 }; }",
     ];
     for source in invalid {
-        let error = check_source(source, Limits::default()).expect_err(source);
+        let error = check_source(source, ParseLimits::default()).expect_err(source);
         assert!(error.span.is_some(), "missing span for {source}: {error:?}");
     }
 }
@@ -54,12 +54,12 @@ fn required_rejection_corpus_is_rejected_with_spans() {
 #[test]
 fn format_program_canonicalizes_parsed_but_type_invalid_sources() {
     let source = "fn main( ) { // discard me\n let value: bool = 1_i64; }";
-    let parsed = parse(source, Limits::default()).expect("source must parse");
+    let parsed = parse(source, ParseLimits::default()).expect("source must parse");
     assert!(check(&parsed).is_err());
 
     let canonical = format_program(&parsed);
     assert_eq!(canonical, "fn main() {\n    let value: bool = 1_i64;\n}\n");
-    let reparsed = parse(&canonical, Limits::default()).expect("canonical source must parse");
+    let reparsed = parse(&canonical, ParseLimits::default()).expect("canonical source must parse");
     assert_eq!(format_program(&reparsed), canonical);
 }
 
@@ -92,46 +92,46 @@ fn rejects_profile_edge_cases() {
         "fn g(x: ()) -> bool { true } fn f() -> i64 { while g({ return 1_i64; }) {} let x = (); } fn main() {}",
     ];
     for source in invalid {
-        assert!(check_source(source, Limits::default()).is_err(), "{source}");
+        assert!(check_source(source, ParseLimits::default()).is_err(), "{source}");
     }
 }
 
 #[test]
 fn frontend_limits_and_encoding_are_structured() {
-    let invalid_utf8 = frontend_error(parse_bytes(&[0xff], Limits::default()), "invalid UTF-8");
+    let invalid_utf8 = frontend_error(parse_bytes(&[0xff], ParseLimits::default()), "invalid UTF-8");
     assert_eq!(invalid_utf8.phase, Phase::Lex);
     let non_ascii = frontend_error(
-        parse("fn main() { // é\n }", Limits::default()),
+        parse("fn main() { // é\n }", ParseLimits::default()),
         "non-ASCII",
     );
     assert_eq!(non_ascii.phase, Phase::Lex);
 
-    let limits = Limits {
+    let limits = ParseLimits {
         max_source_bytes: 4,
-        ..Limits::default()
+        ..ParseLimits::default()
     };
     assert_eq!(
         frontend_error(parse("fn main() {}", limits), "size limit").phase,
         Phase::Lex
     );
 
-    let limits = Limits {
+    let limits = ParseLimits {
         max_tokens: 3,
-        ..Limits::default()
+        ..ParseLimits::default()
     };
     assert!(parse("fn main() {}", limits).is_err());
 
-    let limits = Limits {
+    let limits = ParseLimits {
         max_delimiter_depth: 2,
-        ..Limits::default()
+        ..ParseLimits::default()
     };
     assert!(parse("fn main() { ((1_i64)); }", limits).is_err());
 
     let chained_addition = (0..96).map(|_| "1_i64").collect::<Vec<_>>().join(" + ");
     let print_source = format!("fn main() {{ println!(\"{{}}\", {chained_addition}); }}");
-    let limits = Limits {
+    let limits = ParseLimits {
         max_syntax_depth: 64,
-        ..Limits::default()
+        ..ParseLimits::default()
     };
     let wrapped_error = frontend_error(
         parse(&print_source, limits),
@@ -151,25 +151,26 @@ fn arithmetic_traps_and_runtime_limits_are_structured() {
         "fn main() { 1_i64 % 0_i64; }",
     ];
     for source in traps {
-        let program = check_source(source, Limits::default()).expect("trap source must check");
-        let error = run(&program, RuntimeLimits::default()).expect_err(source);
-        assert_eq!(error.phase, Phase::Runtime);
+        let program = check_source(source, ParseLimits::default()).expect("trap source must check");
+        let error = run(&program, Limits::default()).expect_err(source);
+        assert_eq!(error.diagnostic.phase, Phase::Runtime);
+        assert_eq!(error.stdout, b"", "{source} must print nothing before the trap");
     }
 
     let recursive = check_source(
         "fn recurse() { recurse(); } fn main() { recurse(); }",
-        Limits::default(),
+        ParseLimits::default(),
     )
     .expect("recursive source must check");
     let error = run(
         &recursive,
-        RuntimeLimits {
-            max_call_depth: 4,
-            ..RuntimeLimits::default()
+        Limits {
+            maximum_call_depth: 4,
+            ..Limits::default()
         },
     )
     .expect_err("call-depth limit");
-    assert_eq!(error.message, "call depth limit exceeded");
+    assert_eq!(error.diagnostic.message, "call depth limit exceeded");
 }
 
 #[test]
@@ -178,28 +179,28 @@ fn unreachable_locals_do_not_preallocate_every_recursive_frame() {
         .map(|index| format!("let x{index} = 0_i64;"))
         .collect::<String>();
     let source = format!("fn recurse() {{ recurse(); {unreachable} }} fn main() {{ recurse(); }}");
-    let program = check_source(&source, Limits::default()).expect("recursive source must check");
+    let program = check_source(&source, ParseLimits::default()).expect("recursive source must check");
     let error = run(
         &program,
-        RuntimeLimits {
+        Limits {
             fuel: 10_000,
-            max_call_depth: 64,
-            max_output_bytes: 0,
+            maximum_call_depth: 64,
+            maximum_output_bytes: 0,
         },
     )
     .expect_err("call depth must stop recursion");
-    assert_eq!(error.message, "call depth limit exceeded");
+    assert_eq!(error.diagnostic.message, "call depth limit exceeded");
 }
 
 #[test]
 fn println_nested_runtime_spans_map_to_original_source() {
     let source = "fn main() { println!(\"{}\", 1_i64 + (2_i64 / 0_i64)); }";
-    let program = check_source(source, Limits::default()).expect("source must check");
-    let error = run(&program, RuntimeLimits::default()).expect_err("division must trap");
+    let program = check_source(source, ParseLimits::default()).expect("source must check");
+    let error = run(&program, Limits::default()).expect_err("division must trap");
     let expected = "2_i64 / 0_i64";
     let start = source.find(expected).expect("nested expression");
     assert_eq!(
-        error.span,
+        error.diagnostic.span,
         Some(rustscript_core::Span {
             start,
             end: start + expected.len(),
@@ -210,7 +211,7 @@ fn println_nested_runtime_spans_map_to_original_source() {
 #[test]
 fn println_nested_admission_spans_map_to_original_source() {
     let source = "fn main() { println!(\"{}\", || true); }";
-    let error = frontend_error(parse(source, Limits::default()), "closure must be rejected");
+    let error = frontend_error(parse(source, ParseLimits::default()), "closure must be rejected");
     let expected = "|| true";
     let start = source.find(expected).expect("closure expression");
     assert_eq!(

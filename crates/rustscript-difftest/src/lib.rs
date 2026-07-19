@@ -314,7 +314,7 @@ fn compare_source(
     oracle: &RustcOracle,
     require_canonical_input: bool,
 ) -> Result<CaseSuccess, Box<DiffFailure>> {
-    let checked = rustscript_core::check_source(source, rustscript_core::Limits::default())
+    let checked = rustscript_core::check_source(source, rustscript_core::ParseLimits::default())
         .map_err(|error| {
             failure(
                 DiffFailureKind::PrettyPrintRoundTrip,
@@ -328,7 +328,7 @@ fn compare_source(
             )
         })?;
     let canonical = rustscript_core::format(&checked);
-    let reparsed = rustscript_core::check_source(&canonical, rustscript_core::Limits::default())
+    let reparsed = rustscript_core::check_source(&canonical, rustscript_core::ParseLimits::default())
         .map_err(|error| {
             failure(
                 DiffFailureKind::PrettyPrintRoundTrip,
@@ -356,7 +356,7 @@ fn compare_source(
             None,
         ));
     }
-    let limits = rustscript_core::RuntimeLimits::default();
+    let limits = rustscript_core::Limits::default();
     let first = rustscript_core::run(&checked, limits).map_err(|error| {
         failure(
             DiffFailureKind::PrettyPrintRoundTrip,
@@ -618,7 +618,7 @@ fn failure(
 pub fn minimize_failure(failure: &mut DiffFailure, oracle: &RustcOracle) {
     let mut current = failure.source.clone();
     while let Ok(program) =
-        rustscript_core::check_source(&current, rustscript_core::Limits::default())
+        rustscript_core::check_source(&current, rustscript_core::ParseLimits::default())
     {
         let mut candidates: Vec<_> = rustscript_core::reduction_candidates(&program)
             .into_iter()
@@ -659,7 +659,7 @@ pub fn write_failure_artifact_with_oracle(
     write_file(&directory, "failure.rs", failure.source.as_bytes())?;
     write_file(&directory, "canonical.rs", failure.canonical.as_bytes())?;
     write_file(&directory, "minimized.rs", failure.minimized.as_bytes())?;
-    let ast = rustscript_core::parse(&failure.source, rustscript_core::Limits::default())
+    let ast = rustscript_core::parse(&failure.source, rustscript_core::ParseLimits::default())
         .map(|program| rustscript_core::debug_syntax(&program))
         .unwrap_or_else(|error| format!("syntax tree unavailable: {error}"));
     write_file(&directory, "ast.txt", ast.as_bytes())?;
@@ -669,8 +669,8 @@ pub fn write_failure_artifact_with_oracle(
         &failure.interpreter_stdout,
     )?;
 
-    let frontend = rustscript_core::Limits::default();
-    let runtime = rustscript_core::RuntimeLimits::default();
+    let frontend = rustscript_core::ParseLimits::default();
+    let runtime = rustscript_core::Limits::default();
     let mut rustc_version = failure
         .oracle
         .as_ref()
@@ -720,8 +720,8 @@ pub fn write_failure_artifact_with_oracle(
         frontend.max_functions,
         frontend.max_parameters,
         runtime.fuel,
-        runtime.max_call_depth,
-        runtime.max_output_bytes,
+        runtime.maximum_call_depth,
+        runtime.maximum_output_bytes,
         serde_json::to_string(&reproduce_argv).expect("runner argv must serialize"),
         serde_json::to_string(&replay_argv).expect("runner argv must serialize"),
     );
@@ -1179,11 +1179,11 @@ mod tests {
                 "integer arithmetic overflow",
             ),
         ] {
-            let checked = rustscript_core::check_source(source, rustscript_core::Limits::default())
+            let checked = rustscript_core::check_source(source, rustscript_core::ParseLimits::default())
                 .unwrap_or_else(|error| panic!("{name} did not check: {error}"));
-            let error = rustscript_core::run(&checked, rustscript_core::RuntimeLimits::default())
+            let error = rustscript_core::run(&checked, rustscript_core::Limits::default())
                 .unwrap_err();
-            assert_eq!(error.message, expected_message, "{name}");
+            assert_eq!(error.diagnostic.message, expected_message, "{name}");
 
             let native = oracle
                 .run_source(source)

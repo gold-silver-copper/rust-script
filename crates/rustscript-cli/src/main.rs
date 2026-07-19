@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use annotate_snippets::{AnnotationKind, Level, Renderer, Snippet};
-use rustscript_core::{Diagnostic, Limits, RuntimeLimits};
+use rustscript_core::{Diagnostic, ParseLimits, Limits};
 
 fn main() -> ExitCode {
     match run_cli(std::env::args_os().skip(1).collect()) {
@@ -43,18 +43,30 @@ struct DiagnosticReport {
     path: String,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Operation {
+    Check,
+    Run,
+    Ast,
+    Fmt,
+}
+
 fn run_cli(arguments: Vec<std::ffi::OsString>) -> Result<(), CliError> {
     if arguments.len() != 2 {
         return Err(CliError::Usage("expected an operation and source file"));
     }
-    let operation = arguments[0]
+    let operation = match arguments[0]
         .to_str()
-        .ok_or(CliError::Usage("operation must be valid UTF-8"))?;
-    if !matches!(operation, "check" | "run" | "ast" | "fmt") {
-        return Err(CliError::Usage("unknown operation"));
-    }
+        .ok_or(CliError::Usage("operation must be valid UTF-8"))?
+    {
+        "check" => Operation::Check,
+        "run" => Operation::Run,
+        "ast" => Operation::Ast,
+        "fmt" => Operation::Fmt,
+        _ => return Err(CliError::Usage("unknown operation")),
+    };
     let path = Path::new(&arguments[1]);
-    let parse_limits = Limits::default();
+    let parse_limits = ParseLimits::default();
     let source = read_bounded(path, parse_limits.max_source_bytes).map_err(CliError::Io)?;
     let display_path = path.display().to_string();
     let parsed = rustscript_core::parse_bytes(&source, parse_limits).map_err(|error| {
@@ -65,14 +77,14 @@ fn run_cli(arguments: Vec<std::ffi::OsString>) -> Result<(), CliError> {
         }))
     })?;
     let mut stdout = io::stdout().lock();
-    if operation == "ast" {
+    if operation == Operation::Ast {
         stdout
             .write_all(rustscript_core::debug_syntax(&parsed).as_bytes())
             .map_err(CliError::Io)?;
         stdout.write_all(b"\n").map_err(CliError::Io)?;
         return stdout.flush().map_err(CliError::Io);
     }
-    if operation == "fmt" {
+    if operation == Operation::Fmt {
         stdout
             .write_all(rustscript_core::format_program(&parsed).as_bytes())
             .map_err(CliError::Io)?;
@@ -90,22 +102,21 @@ fn run_cli(arguments: Vec<std::ffi::OsString>) -> Result<(), CliError> {
             },
         )
     })?;
-    match operation {
-        "check" => {}
-        "run" => {
-            let execution =
-                rustscript_core::run(&checked, RuntimeLimits::default()).map_err(|error| {
-                    CliError::Diagnostic(Box::new(DiagnosticReport {
-                        error: error.with_file_name(display_path.clone()),
-                        source: source.clone(),
-                        path: display_path.clone(),
-                    }))
-                })?;
-            stdout.write_all(&execution.stdout).map_err(CliError::Io)?;
+    if operation == Operation::Run {
+        match rustscript_core::run(&checked, Limits::default()) {
+            Ok(execution) => stdout.write_all(&execution.stdout).map_err(CliError::Io)?,
+            Err(failure) => {
+                // Native execution writes its output prefix before trapping;
+                // emit the interpreter's matching partial stdout first.
+                stdout.write_all(&failure.stdout).map_err(CliError::Io)?;
+                stdout.flush().map_err(CliError::Io)?;
+                return Err(CliError::Diagnostic(Box::new(DiagnosticReport {
+                    error: failure.diagnostic.with_file_name(display_path.clone()),
+                    source: source.clone(),
+                    path: display_path,
+                })));
+            }
         }
-        "ast" => return Err(CliError::Usage("unknown operation")),
-        "fmt" => return Err(CliError::Usage("unknown operation")),
-        _ => return Err(CliError::Usage("unknown operation")),
     }
     stdout.flush().map_err(CliError::Io)
 }
