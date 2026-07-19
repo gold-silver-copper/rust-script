@@ -1,0 +1,24 @@
+{
+  "name": "rustscript-wasm",
+  "version": "0.1.0",
+  "description": "Browser worker host and wasm-bindgen package for rustscript.",
+  "license": "MIT OR Apache-2.0",
+  "type": "module",
+  "files": [
+    "host.js",
+    "prepare-package.mjs",
+    "worker.js",
+    "pkg/"
+  ],
+  "exports": {
+    ".": "./host.js",
+    "./worker.js": "./worker.js",
+    "./pkg/rustscript_wasm.js": "./pkg/rustscript_wasm.js"
+  },
+  "scripts": {
+    "build": "wasm-pack build --target web --out-dir pkg && node ./prepare-package.mjs",
+    "prepack": "npm run build",
+    "test": "node --test host.test.mjs worker.integration.test.mjs",
+    "pack:check": "npm pack --dry-run --json"
+  }
+}

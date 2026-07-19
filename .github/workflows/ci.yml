@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: clippy,rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS='-D missing-docs' cargo doc --workspace --no-deps
+      - run: cargo test --workspace --exclude rustscript-difftest
+      # The feature-gated generator-support proptests (canonical round trip,
+      # emitter idempotence, deterministic interpretation) only build with the
+      # non-default features enabled.
+      - run: cargo test -p rustscript-core --all-features
+      - run: cargo test -p rustscript-difftest -- --test-threads=1 --nocapture
+      # The randomized rustc-backed property test is #[ignore]d so that plain
+      # `cargo test` stays deterministic; CI still exercises it explicitly.
+      - run: cargo test -p rustscript-difftest -- --test-threads=1 --ignored
+      - run: cargo run -p rustscript-difftest -- --seed 1 --cases 25
+
+  wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: browser-actions/setup-firefox@v1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack
+      - run: cargo check -p rustscript-wasm --target wasm32-unknown-unknown
+      - run: wasm-pack test --node crates/rustscript-wasm
+      - run: wasm-pack test --headless --firefox crates/rustscript-wasm --test browser
+      - run: npm --prefix crates/rustscript-wasm run build
+      - run: npm --prefix crates/rustscript-wasm test
+      - run: npm --prefix crates/rustscript-wasm run pack:check
+
+  fuzz-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - run: |
+          host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+          cargo +nightly fuzz build parser_bytes --target "$host"
+        working-directory: fuzz
+      - run: |
+          host="$(rustc +nightly -vV | sed -n 's/^host: //p')"
+          cargo +nightly fuzz build ast_roundtrip --target "$host"
+        working-directory: fuzz

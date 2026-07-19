@@ -1,1 +1,6 @@
 /target
+/artifacts
+/crates/rustscript-wasm/pkg
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts

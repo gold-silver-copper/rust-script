@@ -1,0 +1,110 @@
+# Backlog
+
+The durable work queue. Agents: pick from the top, finish, verify, move the
+item to the log below with the commit hash, and append anything new you
+discover. Priorities follow the ranking in [`AGENTS.md`](../AGENTS.md).
+Do not delete this file's structure.
+
+## P2 — verification depth
+
+- [x] Run a long `parser_bytes` fuzz campaign. Done 2026-07-19: after the
+      frontmatter fix and the admitted-trees-only `check_parser` change, a
+      full hour ran 27,612,191 executions with no crash. Earlier campaigns
+      found and fixed the frontmatter lexer panic and hardened the
+      `check_parser` strategy (see done log and issue #3).
+- [x] Run a long `ast_roundtrip` campaign the same way. Done 2026-07-19:
+      a 30-minute campaign ran 400,283 executions with no crash.
+- [ ] Differential volume (ongoing hygiene — never "closeable"; run a
+      fresh seed each idle iteration): tried so far — seed 1 (×1000, ×200,
+      ×100), seed 7 (×100), seed 12345 (spot), seed 424242 (×5000, PASSED
+      2026-07-18), seed 987654 (×5000, PASSED 2026-07-19), seed 555123
+      (×10000, PASSED 2026-07-19). No mismatch found at any seed to date.
+- [x] Property test for the parsed-tree emitter (`format_program`). Done
+      2026-07-19: `format_program_is_idempotent_and_preserves_checked_ir`
+      (feature-gated proptest) generates admitted programs, then asserts
+      `format_program` is idempotent, agrees with the checked-IR emitter,
+      and preserves the checked IR through a reparse — generalizing the
+      fixed-source drift guard to arbitrary generated programs. (Uses
+      generated admitted sources rather than fuzz-corpus harvesting, since
+      `fuzz/corpus/` is gitignored and non-deterministic.)
+
+## P3 — robustness & tooling polish
+
+- [ ] Chrome/chromedriver run in the CI wasm job alongside Firefox
+      (worker `error`-event semantics are the engine-variant risk).
+- [x] `--artifacts PATH` flag for `rustscript-difftest`. Done 2026-07-19:
+      overrides the default cwd-relative `artifacts/differential` root; unit
+      tests plus an end-to-end `--keep-all` write to a custom dir.
+- [ ] Oracle reader-drain timeout currently surfaces as a hard
+      `NativeFailure`; consider returning captured bytes with the existing
+      `OutputCaptureTruncated` classification instead.
+- [ ] Windows: `terminate_process_tree` kills only the direct child
+      (documented). Real fix needs Job Objects; needs a Windows CI runner
+      to validate — otherwise leave documented.
+- [x] Note the dropped spec-listed `serde` dependency of
+      `rustscript-difftest` in `docs/tooling-reuse.md`. Done 2026-07-19:
+      added a "Dependency-list deviations" section covering both the
+      `wait-timeout` removal and the omitted redundant direct `serde`.
+
+## HIR-reuse gate (open items before the borrow/generics frontier)
+
+See [`docs/hir-reuse-gate.md`](hir-reuse-gate.md). The 2026-07-19 re-run proved
+single-file HIR inference works and compiles for wasm; these remain before the
+gate could justify embedding at the borrow/generics threshold:
+
+- [ ] Prove **browser execution** of the inference path (headless wasm-bindgen
+      run, not just a compile) — now the decisive open criterion.
+- [ ] Find a **production (non-test-fixture) database path**: wire `Semantics`
+      onto `ra_ap_ide::Analysis::from_single_file`'s database, replacing
+      `ra_ap_test_fixture::RootDatabase::with_single_file`.
+- [ ] Integrate and measure **resource-bounding / determinism** of HIR
+      inference under adversarial input.
+- [ ] Measure **bundle size / build-time** cost (~225-package wasm graph) for
+      the browser engine.
+- [ ] Assess **diagnostic sufficiency** — can HIR facts enforce every subset
+      rule with good spans without a second checker?
+
+## Needs human decision (do not implement unilaterally)
+
+- Multi-error reporting at lex/parse: the spec's
+  `parse -> Result<_, Diagnostic>` signature forces first-error-only.
+  Aggregating requires a public API change.
+- Any language-subset extension — now governed by the HIR-reuse gate
+  (see above and `docs/hir-reuse-gate.md`). Value-semantics features are
+  implementable on the hand-rolled checker once a human picks the target
+  profile; borrow/generics/traits are gated on completing the gate.
+- Batched rustc invocations in the differential runner (spec allows it
+  only after correctness is established; decide if the compile-time win
+  matters).
+
+## Done log
+
+- 2026-07-19 — **fuzz strategy hardened**: `check_parser` was hitting a
+  third pinned-dependency assertion (`fn\x03<{}`, control byte, at
+  `validation.rs:204`) — the dependency's own fuzz helper is not robust to
+  arbitrary bytes and this binary is `panic = abort`, so per-input guards
+  were unbounded whack-a-mole. Now `check_parser` runs only on
+  rustscript-admitted trees (where a real discrepancy would matter); the
+  frontmatter skip stays because it protects our own `parse_bytes` call.
+  Product path was already clean on all these inputs. Seeds 424242 and
+  987654 differential runs (×5000 each) passed with no mismatch.
+- 2026-07-18 — **fuzz finding fixed**: a leading `---` drove
+  `ra_ap_parser`'s Edition 2024 frontmatter probe to panic inside
+  `LexedStr::new`, which ran in `lex_policy::validate` outside any panic
+  boundary — `parse_bytes` unwound instead of returning a diagnostic. The
+  lexer call is now contained by `contain_unwind` alongside the parser;
+  regression test and corpus entry added; fuzz target guards the known
+  dependency crash.
+- 2026-07-18 — exact-boundary limit tests for `max_tokens`, delimiter
+  depth, syntax elements, and syntax depth (accept at exactly N, reject
+  below); `parser_bytes` guards the known `{#}` check_parser panic class
+  so long fuzz campaigns are no longer blocked on the documented
+  dependency finding.
+- 2026-07-18 `651f64b`..`da09f51` — spec-conformance review round: prefix
+  stack-overflow class fixed twice (homogeneous runs, then interleaved
+  chains defeating the run counter), public API aligned to spec surface,
+  partial-stdout runtime failures, multi-diagnostic `check`, admission-phase
+  reserved-name/comparison-chain checks, emitter drift guard (found a real
+  empty-block bug), generator strengthening (4096-decision streams,
+  ±1000 literals, computed operands, bounded `break`), worker-host request
+  timeout, leading-zero literal rejection, CI/docs gaps closed.

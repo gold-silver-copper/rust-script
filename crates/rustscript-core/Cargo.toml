@@ -1,0 +1,20 @@
+[package]
+name = "rustscript-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+serde = ["dep:serde"]
+generator-support = []
+
+[dependencies]
+ra_ap_syntax.workspace = true
+ra_ap_parser.workspace = true
+line-index.workspace = true
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+proptest.workspace = true

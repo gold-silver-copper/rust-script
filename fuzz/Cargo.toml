@@ -1,0 +1,28 @@
+[package]
+name = "rustscript-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+ra_ap_syntax = "=0.0.342"
+rustscript-core = { path = "../crates/rustscript-core", features = ["generator-support"] }
+
+[[bin]]
+name = "parser_bytes"
+path = "fuzz_targets/parser_bytes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ast_roundtrip"
+path = "fuzz_targets/ast_roundtrip.rs"
+test = false
+doc = false
+bench = false
