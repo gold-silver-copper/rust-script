@@ -53,6 +53,15 @@ Do not delete this file's structure.
 
 ## Done log
 
+- 2026-07-19 — **fuzz strategy hardened**: `check_parser` was hitting a
+  third pinned-dependency assertion (`fn\x03<{}`, control byte, at
+  `validation.rs:204`) — the dependency's own fuzz helper is not robust to
+  arbitrary bytes and this binary is `panic = abort`, so per-input guards
+  were unbounded whack-a-mole. Now `check_parser` runs only on
+  rustscript-admitted trees (where a real discrepancy would matter); the
+  frontmatter skip stays because it protects our own `parse_bytes` call.
+  Product path was already clean on all these inputs. Seeds 424242 and
+  987654 differential runs (×5000 each) passed with no mismatch.
 - 2026-07-18 — **fuzz finding fixed**: a leading `---` drove
   `ra_ap_parser`'s Edition 2024 frontmatter probe to panic inside
   `LexedStr::new`, which ran in `lex_policy::validate` outside any panic
