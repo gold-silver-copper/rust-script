@@ -25,6 +25,13 @@ map and the measured reason the HIR/type-inference stack is not embedded. See
 [the regression corpus](docs/regression-corpus.md) for minimized bug-category
 coverage and dependency fuzz findings.
 
+Development is spec-driven and agent-friendly: the authoritative
+specification is vendored at [docs/spec.md](docs/spec.md), the working-agent
+manual (invariants, session workflow, danger zones) is
+[AGENTS.md](AGENTS.md), the prioritized work queue is
+[docs/backlog.md](docs/backlog.md), and `scripts/verify.sh` is the
+verification gate every change must pass.
+
 ## Exact language profile
 
 By default, source is limited to 1 MiB; it must be valid UTF-8 and ASCII-only.
